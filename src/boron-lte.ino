@@ -22,6 +22,7 @@ SYSTEM_MODE(SEMI_AUTOMATIC); */
 #define OV_TOPIC_CFG_SET "ov/config/set"
 #define OV_TOPIC_GPS_SET "ov/gps/set"
 #define OV_TOPIC_OPEN_ACTION "ov/open" //send to this topic when execute open action
+#define OV_TOPIC_SHAKE_ACTION "ov/shake" //send to this topic when execute shake action
 
 #define AMAZON_IOT_ROOT_CA_PEM                                          \
 "-----BEGIN CERTIFICATE-----\r\n" \
@@ -415,6 +416,20 @@ void loop()
         client.publish(OV_TOPIC_OPEN_ACTION, openMsg);
         free(openMsg);
     }
+
+    if (isRxShakeAction)
+    {
+        isRxShakeAction = false;
+        char *shakeMsg = (char *)calloc(128, sizeof(uint8_t));
+        snprintf(shakeMsg, 128, 
+        "{ \
+        \"shake\": \"%d\" \
+        }", 
+        rxShakeAction);
+        client.publish(OV_TOPIC_SHAKE_ACTION, shakeMsg);
+        free(shakeMsg);
+    }
+    
      
     
 }
@@ -517,7 +532,8 @@ void receiveEvent(int n)
         shk = false;
         for (int i = 0; i < n && Wire.available() > 0; i++)
         {
-            
+            rxShakeAction = Wire.read();
+            isRxShakeAction = true;
         }
         
     }
