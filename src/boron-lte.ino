@@ -20,7 +20,7 @@ SYSTEM_MODE(SEMI_AUTOMATIC); */
 /*TOPICS*/
 #define OV_TOPIC_CFG_GET "ov/config/get"
 #define OV_TOPIC_CFG_SET "ov/config/set"
-#define OV_TOPIC_GPS_SET "ov/gps/set"
+#define OV_TOPIC_GPS_SET "ov/gps/get"
 #define OV_TOPIC_OPEN_ACTION "ov/open" //send to this topic when execute open action
 #define OV_TOPIC_SHAKE_ACTION "ov/shake" //send to this topic when execute shake action
 
