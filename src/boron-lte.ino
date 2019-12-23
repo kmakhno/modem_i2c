@@ -11,6 +11,8 @@
 SYSTEM_MODE(SEMI_AUTOMATIC); */
 #include <MQTT-TLS.h>
 #include <ArduinoJson.h>
+#include "boron-lte.h"
+#include "ble_modem.h"
 
 #define MODEM_ADDRESS 4
 #define ONE_DAY_MILLIS (24 * 60 * 60 * 1000)
@@ -102,47 +104,7 @@ const char clientKeyCrtPem[] = CELINT_KEY_CRT_PEM;
 "-----END RSA PRIVATE KEY----- "
 
 const char clientKeyPem[] = CELINT_KEY_PEM;
-
-typedef struct
-{
-    char version[33];
-    char name[20];
-    char id[20];
-    uint8_t armed;
-    uint16_t locInt;
-    uint8_t needPhoto;
-    uint8_t photoInt;
-    uint8_t soundAlarm;
-    uint8_t crashLog;
-    uint8_t enaLog;
-} ov_cgf_s;
-
-typedef struct ov_gps_utc_t
-{
-  uint8_t  hour;
-  uint8_t  minute;
-  uint8_t  seconds;
-  uint8_t  year;
-  uint8_t  month;
-  uint8_t  day;
-} ov_gps_utc_s;
-
-typedef struct ov_gps_loc_t
-{
-  float latitude;
-  float longitude;
-  char  lat;
-  char  lon;
-} ov_gps_loc_s;
-
-typedef struct ov_gps_info_t
-{
-  ov_gps_utc_s gps_utc;
-  ov_gps_loc_s gps_loc;
-  uint8_t      gps_fix;
-} ov_gps_data_s;
-
-static ov_cgf_s _cfg; //тут будем хранить данные которые пришли с AWS
+ov_cgf_s _cfg; //тут будем хранить данные которые пришли с AWS
 static ov_gps_data_s _gps; //будем хранить данные которые пришли от ESP
 
 void awsCallback(char* topic, uint8_t* payload, unsigned int length);
@@ -199,7 +161,7 @@ volatile bool act = false;
 volatile bool shk = false;
 volatile bool dat = false;
 
-static volatile bool hasDataForESP = false; //этот флаг устанавливаеться когда есть конфигурационные данные для ESP 
+bool hasDataForESP = false; //этот флаг устанавливаеться когда есть конфигурационные данные для ESP 
 
 // setup() runs once, when the device is first turned on.
 void setup() 
@@ -220,6 +182,8 @@ void setup()
     Cellular.setActiveSim(EXTERNAL_SIM);
     Cellular.setCredentials("internet");
 
+    ble_modem_init();
+
     Cellular.connect();
     while(!Cellular.ready());
     Serial.println("ready.");
@@ -239,8 +203,6 @@ void setup()
         {
             Serial.println("not connected");
         }
-        
-        
     }
 
 }
@@ -430,6 +392,8 @@ void loop()
         free(shakeMsg);
     }
     
+
+    ble_modem_listener();
      
     
 }
