@@ -225,8 +225,8 @@ void setup()
     Wire.onReceive(receiveEvent);
     Wire.onRequest(requestEvent);
 
-    Cellular.setActiveSim(EXTERNAL_SIM);
-    Cellular.setCredentials("internet");
+    Cellular.setActiveSim(INTERNAL_SIM);
+    Cellular.clearCredentials();
 
     Cellular.connect();
     while(!Cellular.ready());
