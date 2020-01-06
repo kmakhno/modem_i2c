@@ -13,6 +13,7 @@ SYSTEM_MODE(SEMI_AUTOMATIC); */
 #include <ArduinoJson.h>
 #include "boron-lte.h"
 #include "ble_modem.h"
+#include <google-maps-device-locator.h>
 
 #define MODEM_ADDRESS 4
 #define ONE_DAY_MILLIS (24 * 60 * 60 * 1000)
@@ -22,7 +23,8 @@ SYSTEM_MODE(SEMI_AUTOMATIC); */
 /*TOPICS*/
 #define OV_TOPIC_CFG_GET "ov/config/get"
 #define OV_TOPIC_CFG_SET "ov/config/set"
-#define OV_TOPIC_GPS_SET "ov/gps/get"
+#define OV_TOPIC_GPS_SET "ov/gps/set"
+#define OV_TOPIC_GPS_GET "ov/gps/get"
 #define OV_TOPIC_OPEN_ACTION "ov/open" //send to this topic when execute open action
 #define OV_TOPIC_SHAKE_ACTION "ov/shake" //send to this topic when execute shake action
 
@@ -110,6 +112,7 @@ static ov_gps_data_s _gps; //будем хранить данные которы
 void awsCallback(char* topic, uint8_t* payload, unsigned int length);
 void receiveEvent(int n);
 void requestEvent(void);
+void locationCallback(float i_lat, float i_lon, float i_accuracy);
 
 char AWS_endpoint[128] = "aiotk5j0bsbka-ats.iot.us-east-2.amazonaws.com";
 TCPClient tcpClient;
@@ -163,6 +166,11 @@ volatile bool dat = false;
 
 bool hasDataForESP = false; //этот флаг устанавливаеться когда есть конфигурационные данные для ESP 
 
+GoogleMapsDeviceLocator locator; //for positioning by towers (and wifi)
+bool isFix = false;
+static float lat = 0.0;
+static float lon = 0.0;
+
 // setup() runs once, when the device is first turned on.
 void setup() 
 {
@@ -179,8 +187,8 @@ void setup()
     Wire.onReceive(receiveEvent);
     Wire.onRequest(requestEvent);
 
-    Cellular.setActiveSim(EXTERNAL_SIM);
-    Cellular.setCredentials("internet");
+    Cellular.setActiveSim(INTERNAL_SIM);
+    Cellular.clearCredentials();
 
     ble_modem_init();
 
@@ -204,12 +212,14 @@ void setup()
             Serial.println("not connected");
         }
     }
+    locator.withSubscribe(locationCallback).withLocatePeriodic(60);
 
 }
 
 // loop() runs over and over again, as quickly as it can execute.
 void loop() 
 {
+    locator.loop();
 
     if (client.isConnected()) 
     {
@@ -292,7 +302,6 @@ void loop()
 
         //отправляем сформированный JSON объект на AWS
         client.publish(OV_TOPIC_CFG_GET, buff);
-
         free(cfgV);
         free(devN);
         free(devI);
@@ -331,6 +340,13 @@ void loop()
         _gps.gps_loc.lon = rxGpsData[pos++];
         _gps.gps_fix = rxGpsData[pos++];
 
+        isFix = _gps.gps_fix;
+        if (!isFix)
+        {
+            _gps.gps_loc.latitude = lat;
+            _gps.gps_loc.longitude = lon;
+        }
+        
 
         char *buff = (char *)malloc(512 * sizeof(char));
         memset(buff, 0, 512 * sizeof(char));
@@ -354,12 +370,12 @@ void loop()
         _gps.gps_utc.day,
         _gps.gps_utc.month,
         _gps.gps_utc.year,
-        (_gps.gps_loc.lat == 'N') ? _gps.gps_loc.latitude : -1.0*_gps.gps_loc.latitude,
-        (_gps.gps_loc.lon == 'E') ? _gps.gps_loc.longitude : -1.0*_gps.gps_loc.longitude,
+        (_gps.gps_loc.lat == 'N') ? _gps.gps_loc.latitude : (!_gps.gps_fix) ? _gps.gps_loc.latitude : -1.0*_gps.gps_loc.latitude,
+        (_gps.gps_loc.lon == 'E') ? _gps.gps_loc.longitude : (!_gps.gps_fix) ? _gps.gps_loc.longitude : -1.0*_gps.gps_loc.longitude,
         _gps.gps_fix);
 
         //Send gps data to aws
-        client.publish(OV_TOPIC_GPS_SET, buff);
+        client.publish(OV_TOPIC_GPS_GET, buff);
 
         free(buff);
 
@@ -565,4 +581,15 @@ void requestEvent(void)
         Wire.write(_cfg.enaLog);
         Wire.write(0xFF);
     }
+}
+
+
+void locationCallback(float i_lat, float i_lon, float i_accuracy) 
+{
+    lat = i_lat;
+    lon = i_lon;
+
+    Serial.println(lat);
+    Serial.println(lon);
+    Serial.println(i_accuracy);
 }
