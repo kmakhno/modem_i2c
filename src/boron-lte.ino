@@ -16,7 +16,7 @@ SYSTEM_MODE(SEMI_AUTOMATIC); */
 #define MODEM_ADDRESS 4
 #define ONE_DAY_MILLIS (24 * 60 * 60 * 1000)
 
-#define GPS_PACKAGE_SIZE 17
+#define GPS_PACKAGE_SIZE 18 //for sparkfun gps
 
 /*TOPICS*/
 #define OV_TOPIC_CFG_GET "ov/config/get"
@@ -124,7 +124,7 @@ typedef struct ov_gps_utc_t
   uint8_t  hour;
   uint8_t  minute;
   uint8_t  seconds;
-  uint8_t  year;
+  uint16_t  year;
   uint8_t  month;
   uint8_t  day;
 } ov_gps_utc_s;
@@ -359,20 +359,21 @@ void loop()
         _gps.gps_utc.day = rxGpsData[pos++];
         _gps.gps_utc.month = rxGpsData[pos++];
         _gps.gps_utc.year = rxGpsData[pos++];
+        _gps.gps_utc.year += rxGpsData[pos++] << 8;
 
         int32_t lat_fixed = rxGpsData[pos++];
         lat_fixed += rxGpsData[pos++] << 8;
         lat_fixed += rxGpsData[pos++] << 16;
         lat_fixed += rxGpsData[pos++] << 24;
 
-        _gps.gps_loc.latitude = (float)lat_fixed / 100000;
+        _gps.gps_loc.latitude = (float)lat_fixed / 10000;
 
         int32_t lon_fixed = rxGpsData[pos++];
         lon_fixed += rxGpsData[pos++] << 8;
         lon_fixed += rxGpsData[pos++] << 16;
         lon_fixed += rxGpsData[pos++] << 24;
 
-        _gps.gps_loc.longitude = (float)lon_fixed / 100000;
+        _gps.gps_loc.longitude = (float)lon_fixed / 10000;
 
         _gps.gps_loc.lat = rxGpsData[pos++];
         _gps.gps_loc.lon = rxGpsData[pos++];
@@ -412,8 +413,10 @@ void loop()
         (_gps.gps_loc.lon == 'E') ? _gps.gps_loc.longitude : (!_gps.gps_fix) ? _gps.gps_loc.longitude : -1.0*_gps.gps_loc.longitude,
         _gps.gps_fix);
 
+        Serial.println(buff);
+
         //Send gps data to aws
-        client.publish(OV_TOPIC_GPS_GET, buff);
+        client.publish(OV_TOPIC_GPS_SET, buff);
 
         free(buff);
 
@@ -446,7 +449,8 @@ void loop()
         free(shakeMsg);
     }
     
-     
+     //надо уйти в слип
+    //System.sleep(D3, RISING);
     
 }
 
