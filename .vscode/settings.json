@@ -4,7 +4,22 @@
     "cortex-debug.openocdPath": "${command:particle.getDebuggerOpenocdPath}",
     "files.associations": {
         "*.ino": "cpp",
-        "random": "cpp"
+        "random": "cpp",
+        "array": "cpp",
+        "*.tcc": "cpp",
+        "functional": "cpp",
+        "tuple": "cpp",
+        "fstream": "cpp",
+        "future": "cpp",
+        "istream": "cpp",
+        "limits": "cpp",
+        "mutex": "cpp",
+        "ostream": "cpp",
+        "numeric": "cpp",
+        "streambuf": "cpp",
+        "utility": "cpp",
+        "sstream": "cpp",
+        "thread": "cpp"
     },
     "particle.targetPlatform": "boron",
     "particle.targetDevice": "e00fce68318ed7e8dc028d0a",

@@ -12,9 +12,11 @@ SYSTEM_MODE(SEMI_AUTOMATIC); */
 #include <MQTT-TLS.h>
 #include <ArduinoJson.h>
 #include <google-maps-device-locator.h>
+#include <HttpClient.h>
 
 #define MODEM_ADDRESS 4
 #define ONE_DAY_MILLIS (24 * 60 * 60 * 1000)
+#define THREE_HOUR_MILLIS (10800)
 
 #define GPS_PACKAGE_SIZE 18 //for sparkfun gps
 
@@ -151,12 +153,25 @@ void awsCallback(char* topic, uint8_t* payload, unsigned int length);
 void receiveEvent(int n);
 void requestEvent(void);
 void locationCallback(float i_lat, float i_lon, float i_accuracy);
+unsigned int getLastAlmanacUpdateTime(void);
+bool connectToAWS(void);
 
 char AWS_endpoint[128] = "aiotk5j0bsbka-ats.iot.us-east-2.amazonaws.com";
-TCPClient tcpClient;
 
 MQTT client(AWS_endpoint, 8883, awsCallback);
 
+http_request_t request;
+http_response_t response;
+String host = "oversery.globmill.tech";
+String datePath = "/almanac/date.txt";
+String almanacPath = "/almanac/MTK14.EPO";
+int port = 80;
+http_header_t headers[] = {
+    { "Accept" , "*/*"},
+    { NULL, NULL } // NOTE: Always terminate headers will NULL
+};
+uint32_t almanacLastTiemstamp = 0;
+volatile bool getAlmanac = false;
 /* const char* Host = "www.googleapis.com";
 String thisPage = "/geolocation/v1/geolocate?key=";
 String key = "AIzaSyBZpnB-uBVIL-daYs4gonQ4kPoMS_SmLU0";
@@ -190,6 +205,10 @@ static bool isRxOpenAction = false;
 //store for shake action
 static uint8_t rxShakeAction = 0;
 static bool isRxShakeAction = false;
+
+//almanac timestamp
+bool isAlamanacTimestamp = false;
+unsigned long updateAlmanacTimestampTime = 0;
 
 unsigned long pollTime = 0;
 const unsigned long POLL_TIME_UPDATE = 5000;
@@ -227,29 +246,20 @@ void setup()
 
     Cellular.setActiveSim(INTERNAL_SIM);
     Cellular.clearCredentials();
+    //получаем сразу последний таймстамп обновления альманаха на сервере
+    almanacLastTiemstamp = getLastAlmanacUpdateTime();
+    Serial.println(almanacLastTiemstamp);
 
-    Cellular.connect();
-    while(!Cellular.ready());
-    Serial.println("ready.");
-
-    if (client.enableTls(amazonIoTRootCaPem, sizeof(amazonIoTRootCaPem),clientKeyCrtPem, sizeof(clientKeyCrtPem), clientKeyPem, sizeof(clientKeyPem)) == 0)
+    /*if (connectToAWS())
     {
-        Serial.println("tls enable");
-        client.connect("ESPthing", "Administrator", "ichbindragau22");
-        while(!client.isConnected());
-        if (client.isConnected())
-        {
-            Serial.println("connected");
-            client.subscribe(OV_TOPIC_CFG_SET);
-            
-        }
-        else
-        {
-            Serial.println("not connected");
-        }
-        
-        
+        Serial.println("Connected.");
     }
+    else
+    {
+        Serial.println("Not connected.");
+    } */
+    
+    
     locator.withSubscribe(locationCallback).withLocatePeriodic(60);
 
 }
@@ -339,7 +349,7 @@ void loop()
         Serial.println(buff);
 
         //отправляем сформированный JSON объект на AWS
-        client.publish(OV_TOPIC_CFG_GET, buff);
+        //client.publish(OV_TOPIC_CFG_GET, buff);
         free(cfgV);
         free(devN);
         free(devI);
@@ -451,7 +461,14 @@ void loop()
     
      //надо уйти в слип
     //System.sleep(D3, RISING);
+
+    //получаем дату альманаха каждые 3 часа
+    if (millis() - updateAlmanacTimestampTime >= THREE_HOUR_MILLIS)
+    {
+        almanacLastTiemstamp = getLastAlmanacUpdateTime();
+    }
     
+
 }
 
 
@@ -621,6 +638,14 @@ void requestEvent(void)
         Wire.write(_cfg.enaLog);
         Wire.write(0xFF);
     }
+    else if (CMD[0] == 0x41 && CMD[1] == 0x4C && CMD[2] == 0x4D) //ALM
+    {
+        
+    }
+    else if (CMD[0] == 0x43 && CMD[1] == 0x44 && CMD[2] == 0x54) //CDT
+    {
+        Wire.write((uint8_t *)&almanacLastTiemstamp, 4); //send last timestamp
+    }
 }
 
 
@@ -632,4 +657,43 @@ void locationCallback(float i_lat, float i_lon, float i_accuracy)
     Serial.println(lat);
     Serial.println(lon);
     Serial.println(i_accuracy);
+}
+
+unsigned int getLastAlmanacUpdateTime()
+{
+    HttpClient http;
+    unsigned int timestamp = 0;
+    request.hostname = host;
+    request.path = datePath;
+    request.port = port;
+
+    http.get(request, response, headers);
+    delay(1000);
+    timestamp = (unsigned int)response.body.toInt();
+    //после получения обновляем таймер
+    updateAlmanacTimestampTime = millis();
+
+    return timestamp;
+}
+
+bool connectToAWS(void)
+{
+    unsigned long w = millis();
+    if (client.enableTls(amazonIoTRootCaPem, sizeof(amazonIoTRootCaPem),clientKeyCrtPem, sizeof(clientKeyCrtPem), clientKeyPem, sizeof(clientKeyPem)) == 0)
+    {
+        Serial.println("tls enable");
+        client.connect("ESPthing", "Administrator", "ichbindragau22");
+        while(!client.isConnected() && millis() - w < 10000);
+        if (!client.isConnected())
+        {
+            return false;   
+        }
+        client.subscribe(OV_TOPIC_CFG_SET);
+    }
+    else
+    {
+        return false;
+    }
+    
+    return true;
 }
