@@ -154,11 +154,12 @@ void receiveEvent(int n);
 void requestEvent(void);
 void locationCallback(float i_lat, float i_lon, float i_accuracy);
 unsigned int getLastAlmanacUpdateTime(void);
+bool getLastAlamanac(void);
 bool connectToAWS(void);
 
 char AWS_endpoint[128] = "aiotk5j0bsbka-ats.iot.us-east-2.amazonaws.com";
 
-MQTT client(AWS_endpoint, 8883, awsCallback);
+//MQTT client(AWS_endpoint, 8883, awsCallback);
 
 http_request_t request;
 http_response_t response;
@@ -209,6 +210,16 @@ static bool isRxShakeAction = false;
 //almanac timestamp
 bool isAlamanacTimestamp = false;
 unsigned long updateAlmanacTimestampTime = 0;
+//almanac buffer
+const unsigned int ALMANAC_BUFFER_SIZE = 1024;
+uint8_t almanacBuffer[ALMANAC_BUFFER_SIZE];
+volatile unsigned int bufferPosition = 0;
+volatile bool downloadedAlmanacBlocks = false;
+volatile bool almanacBufferIsEmpty = true;
+volatile static uint8_t blockNumberIsSent = 0;
+const uint8_t ALMANAC_BLOCK_SIZE = 32;
+
+TCPClient client;
 
 unsigned long pollTime = 0;
 const unsigned long POLL_TIME_UPDATE = 5000;
@@ -247,9 +258,9 @@ void setup()
     Cellular.setActiveSim(INTERNAL_SIM);
     Cellular.clearCredentials();
     //получаем сразу последний таймстамп обновления альманаха на сервере
-    almanacLastTiemstamp = getLastAlmanacUpdateTime();
-    Serial.println(almanacLastTiemstamp);
-
+    //almanacLastTiemstamp = getLastAlmanacUpdateTime();
+    //Serial.println(almanacLastTiemstamp);
+    //getLastAlamanac();
     /*if (connectToAWS())
     {
         Serial.println("Connected.");
@@ -260,19 +271,19 @@ void setup()
     } */
     
     
-    locator.withSubscribe(locationCallback).withLocatePeriodic(60);
+    //locator.withSubscribe(locationCallback).withLocatePeriodic(60);
 
 }
 
 // loop() runs over and over again, as quickly as it can execute.
 void loop() 
 {
-    locator.loop();
+    //locator.loop();
 
-    if (client.isConnected()) 
+/*     if (client.isConnected()) 
     {
         client.loop();
-    }
+    } */
 
     if (cfgReceived)
     {
@@ -426,7 +437,7 @@ void loop()
         Serial.println(buff);
 
         //Send gps data to aws
-        client.publish(OV_TOPIC_GPS_SET, buff);
+        //client.publish(OV_TOPIC_GPS_SET, buff);
 
         free(buff);
 
@@ -442,7 +453,7 @@ void loop()
         \"open\": \"%d\" \
         }", 
         rxOpenAction);
-        client.publish(OV_TOPIC_OPEN_ACTION, openMsg);
+        //client.publish(OV_TOPIC_OPEN_ACTION, openMsg);
         free(openMsg);
     }
 
@@ -455,7 +466,7 @@ void loop()
         \"shake\": \"%d\" \
         }", 
         rxShakeAction);
-        client.publish(OV_TOPIC_SHAKE_ACTION, shakeMsg);
+        //client.publish(OV_TOPIC_SHAKE_ACTION, shakeMsg);
         free(shakeMsg);
     }
     
@@ -468,7 +479,7 @@ void loop()
         almanacLastTiemstamp = getLastAlmanacUpdateTime();
     }
     
-
+    getLastAlamanac();
 }
 
 
@@ -518,7 +529,11 @@ void receiveEvent(int n)
     //here we parse command from master(esp)
     if (!cfg && !pht && !gps && !act && !shk && !dat)
     {
-        Wire.readBytesUntil('\r', CMD, sizeof(CMD));        
+        Wire.readBytesUntil('\r', CMD, sizeof(CMD));     
+        if (CMD[0] == 0x41 && CMD[1] == 0x4C && CMD[2] == 0x4D)
+        {
+            getAlmanac = true;
+        }
     }
 
     if (cfg)
@@ -580,7 +595,7 @@ void receiveEvent(int n)
 void requestEvent(void)
 {
     if (CMD[0] == 0x52 && CMD[1] == 0x44 && CMD[2] == 0x59) //RDY == CFG
-    {
+    {     
         Wire.write(0x41);
         cfg = true;
     }
@@ -646,6 +661,40 @@ void requestEvent(void)
     {
         Wire.write((uint8_t *)&almanacLastTiemstamp, 4); //send last timestamp
     }
+    else if (CMD[0] == 0x44 && CMD[1] == 0x57 && CMD[2] == 0x4C) //DWL (подтверждает что блок данных скачан)
+    {
+        if (downloadedAlmanacBlocks)
+        {
+            Wire.write(0x44);
+        }   
+    }
+    else if (CMD[0] == 0x47 && CMD[1] == 0x41 && CMD[2] == 0x4D)
+    {
+        if (downloadedAlmanacBlocks && !almanacBufferIsEmpty)
+        {
+            if (blockNumberIsSent == 32)
+            {
+                Serial.println("Buffer was read.");
+                blockNumberIsSent = 0;
+                bufferPosition = 0;
+                downloadedAlmanacBlocks = false;
+                almanacBufferIsEmpty = true;
+            }
+            else
+            {
+                //send 32 bytes to esp
+                Wire.write(almanacBuffer + blockNumberIsSent * ALMANAC_BLOCK_SIZE, ALMANAC_BLOCK_SIZE);
+                blockNumberIsSent++;
+            }
+            
+/*             for (int pos = 0; pos < sizeof(almanacBuffer);)
+            {
+                Wire.write(almanacBuffer + pos, sizeof(almanacBuffer)/4);
+                pos =+ sizeof(almanacBuffer)/4;
+            } */
+            //bufferPosition = 0;
+        }
+    }
 }
 
 
@@ -676,9 +725,124 @@ unsigned int getLastAlmanacUpdateTime()
     return timestamp;
 }
 
+bool getLastAlamanac(void)
+{
+    static uint16_t numberOfBlocks = 0;
+    uint16_t startByte = 0;
+    uint16_t endByte = 0;
+    const uint16_t blockSize = ALMANAC_BUFFER_SIZE;
+    if (getAlmanac && !downloadedAlmanacBlocks)
+    {
+        if (!client.connected())
+        {
+            bool connected = client.connect("oversery.globmill.tech", 80);       
+            if (!connected)
+            {
+                client.stop();
+                return false;        
+            }
+            startByte = blockSize * numberOfBlocks;
+            endByte = blockSize * (numberOfBlocks + 1) - 1;
+            Serial.println("connected");
+            client.print("GET ");
+            client.print("/almanac/MTK14.EPO");
+            //client.print("/almanac/date.txt");
+            client.println(" HTTP/1.1");
+            client.print("Host: ");
+            client.println("oversery.globmill.tech");
+            client.println("Content-Disposition: attachment; filename=\"MTK14.EPO\"");
+            client.println("Content-Type: application/octet-stream");
+            client.print("Range: bytes=");
+            client.print(startByte);
+            client.print("-");
+            client.println(endByte);
+            client.println("Connection: close");
+            client.println();
+
+            client.flush(); //блокирует пока все данные не будут отправлены
+        }
+        
+
+        unsigned long lastRead = millis();
+        bool hasBody = false;
+        int jj = 0;
+        bool skipResponseHeader = false;
+        int statusCode = 0;
+        int contentLength = 0;
+
+        do
+        {
+            if (client.available())
+            {
+                if (!skipResponseHeader)
+                {
+                    if (!client.find("HTTP/1.1"))
+                    {
+                        break;
+                    }
+                    statusCode = client.parseInt();
+                    if (statusCode != 206)
+                    {
+                        Serial.print("Status code: "); Serial.println(statusCode);
+                        return false;
+                    }
+
+                    if (!client.find("Content-Length:"))
+                    {
+                        break;
+                    }
+                    contentLength = client.parseInt();
+                    if (contentLength != 0)
+                    {
+                        hasBody = true;
+                        Serial.print("Content-Length: "); Serial.println(contentLength);
+                    }
+                    else
+                    {
+                        return false;
+                    }
+
+                    if (!client.find("\r\n\r\n"))
+                    {
+                        break;
+                    }
+
+                    skipResponseHeader = true;                
+                }
+                
+                if (hasBody)
+                {
+                    char c = client.read();
+                    almanacBuffer[bufferPosition] = c;
+                    //Serial.println((int)almanacBuffer[bufferPosition]);
+                    bufferPosition++;                   
+                    lastRead = millis();
+                    jj++;
+                }
+                
+            }
+
+        } while (client.connected() && millis() - lastRead < 5000);
+
+        Serial.println();
+        Serial.print(numberOfBlocks);
+        getAlmanac = false;
+        numberOfBlocks++;
+        if (numberOfBlocks == 105) // 107520/1024 == fileSize/blockSize
+        {
+            numberOfBlocks =  0;
+        }
+        
+        downloadedAlmanacBlocks = true; //1024-bytes block is downloaded
+        almanacBufferIsEmpty = false; //buffer is full
+        client.stop();
+    }
+    return true;
+}
+
 bool connectToAWS(void)
 {
-    unsigned long w = millis();
+/*     unsigned long w = millis();
     if (client.enableTls(amazonIoTRootCaPem, sizeof(amazonIoTRootCaPem),clientKeyCrtPem, sizeof(clientKeyCrtPem), clientKeyPem, sizeof(clientKeyPem)) == 0)
     {
         Serial.println("tls enable");
@@ -695,5 +859,5 @@ bool connectToAWS(void)
         return false;
     }
     
-    return true;
+    return true; */
 }
