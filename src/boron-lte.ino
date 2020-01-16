@@ -162,6 +162,7 @@ void requestEvent(void);
 void locationCallback(float i_lat, float i_lon, float i_accuracy);
 unsigned int getLastAlmanacUpdateTime(void);
 bool connectToAWS(void);
+bool sendBssidToServer(void);
 
 char AWS_endpoint[128] = "aiotk5j0bsbka-ats.iot.us-east-2.amazonaws.com";
 
@@ -251,6 +252,7 @@ volatile bool gps = false;
 volatile bool act = false;
 volatile bool shk = false;
 volatile bool dat = false;
+volatile bool geo = false;
 
 static volatile bool hasDataForESP = false; //этот флаг устанавливаеться когда есть конфигурационные данные для ESP 
 
@@ -258,6 +260,11 @@ GoogleMapsDeviceLocator locator; //for positioning by towers (and wifi)
 bool isFix = false;
 static float lat = 0.0;
 static float lon = 0.0;
+
+char bssidBuffer[10][13];
+static int downloadedBssid = 0;
+int bssidCnt = 0;
+volatile bool bssidReadyToSend = false;
 
 // setup() runs once, when the device is first turned on.
 void setup() 
@@ -497,6 +504,15 @@ void loop()
         updateAlmanacTimestampTime = millis();
         checkAlmanacValidity();
     }
+
+    if (bssidReadyToSend)
+    {
+        bssidReadyToSend = false;
+        //send bsssid to server
+        sendBssidToServer();
+        bssidCnt = 0;
+    }
+    
 }
 
 
@@ -544,7 +560,7 @@ void awsCallback(char* topic, uint8_t* payload, unsigned int length)
 void receiveEvent(int n)
 {
     //here we parse command from master(esp)
-    if (!cfg && !pht && !gps && !act && !shk && !dat)
+    if (!cfg && !pht && !gps && !act && !shk && !dat && !geo)
     {
         Wire.readBytesUntil('\r', CMD, sizeof(CMD));     
     }
@@ -602,7 +618,21 @@ void receiveEvent(int n)
         }
         
     }
-    
+    else if (geo)
+    {
+        geo = false;
+        for (int i = 0; i < n && Wire.available(); i++)
+        {
+            if (bssidCnt != 10)
+            {
+                bssidBuffer[bssidCnt][i] = Wire.read();
+            }           
+        }
+        //Serial.println((char *)(bssidBuffer + bssidCnt));
+        //Serial.println();
+        bssidCnt++;
+        bssidReadyToSend = true;
+    }
 }
 
 void requestEvent(void)
@@ -666,6 +696,12 @@ void requestEvent(void)
         Wire.write(_cfg.enaLog);
         Wire.write(0xFF);
     }
+    else if(CMD[0] == 0x47 && CMD[1] == 0x45 && CMD[2] == 0x4F)
+    {
+        Wire.write(0x41);
+        geo = true;
+    }
+    
 }
 
 
@@ -1158,4 +1194,47 @@ void checkAlmanacValidity(void)
             Serial.println("The almanac wasn't downloaded.");
         }
     }
+}
+
+bool sendBssidToServer(void)
+{
+    if (bssidCnt > 10)
+    {
+        bssidCnt = 10;
+    }
+
+    TCPClient client;
+    bool con = false;
+
+    con = client.connect("oversery.globmill.tech", 80);
+
+    if (!con)
+    {
+        client.stop();
+        Serial.println("Can't be connected.");
+        return false;        
+    }
+//http://oversery.globmill.tech/devices/locate/wifi?bssid=id1,id2,id3
+    Serial.println("connected");
+
+    client.print("GET ");
+    client.print("/devices/locate/wifi?bssid=");
+    int i = 0;
+    for (; i < bssidCnt; i++)
+    {
+        client.print((char *)(bssidBuffer + i));
+        client.print(",");
+        Serial.println((char *)(bssidBuffer + i));
+    }
+    client.println((char *)(bssidBuffer + i));
+    client.println(" HTTP/1.1");
+    client.print("Host: ");
+    client.println("oversery.globmill.tech");
+    client.println("Connection: close");
+    client.println();
+
+    client.flush(); //блокирует пока все данные не будут отправлены
+    
+    client.stop();
+    delay(500);
 }
