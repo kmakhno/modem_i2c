@@ -28,6 +28,13 @@ SYSTEM_MODE(SEMI_AUTOMATIC); */
 #define OV_TOPIC_OPEN_ACTION "ov/open" //send to this topic when execute open action
 #define OV_TOPIC_SHAKE_ACTION "ov/shake" //send to this topic when execute shake action
 
+//Need for downloading almanac
+#define GET_LSB_8BIT(x) (x & 0x00FF)
+#define GET_MSB_8BIT(x) (x & 0xFF00) >> 8
+#define EPO_BINARY_PACKET_LENGTH 191 //191 bytes 
+#define EPO_RESPONSE_TIMEOUT 10000
+#define TWELVE_HOURS_IN_MS   1036800
+
 #define AMAZON_IOT_ROOT_CA_PEM                                          \
 "-----BEGIN CERTIFICATE-----\r\n" \
 "MIIDQTCCAimgAwIBAgITBmyfz5m/jAo54vB4ikPmljZbyjANBgkqhkiG9w0BAQsF\r\n" \
@@ -154,10 +161,33 @@ void receiveEvent(int n);
 void requestEvent(void);
 void locationCallback(float i_lat, float i_lon, float i_accuracy);
 unsigned int getLastAlmanacUpdateTime(void);
-bool getLastAlamanac(void);
 bool connectToAWS(void);
 
 char AWS_endpoint[128] = "aiotk5j0bsbka-ats.iot.us-east-2.amazonaws.com";
+
+//almanac section
+bool downloadAlmanac(unsigned int currentPacket);
+bool sendAlmanacToGps(void);
+
+static char _buffer[180];
+
+const uint8_t PREAMBLE_LSB = 0x04;
+const uint8_t PREAMBLE_MSB = 0x24;
+const uint8_t LENGTH_LSB = 0xBF;
+const uint8_t LENGTH_MSB = 0x00;
+const uint8_t PACK_TYPE_LSB = 0xD2;
+const uint8_t PACK_TYPE_MSB = 0x02;
+const uint8_t END_WORD_LSB = 0x0D;
+const uint8_t END_WORD_MSB = 0x0A;
+
+/************local function declaration**********/
+static void createLastPackage(void);
+static bool _sendAlmanacToGps(void);
+
+/************global variables*****************/
+unsigned long receivedTimeout = 0;
+int rxChar = 0;
+unsigned int deliveredPckg = 0;
 
 //MQTT client(AWS_endpoint, 8883, awsCallback);
 
@@ -171,12 +201,7 @@ http_header_t headers[] = {
     { "Accept" , "*/*"},
     { NULL, NULL } // NOTE: Always terminate headers will NULL
 };
-uint32_t almanacLastTiemstamp = 0;
-volatile bool getAlmanac = false;
-/* const char* Host = "www.googleapis.com";
-String thisPage = "/geolocation/v1/geolocate?key=";
-String key = "AIzaSyBZpnB-uBVIL-daYs4gonQ4kPoMS_SmLU0";
-String jsonString = ""; */
+//uint32_t almanacLastTiemstamp = 0;
 
 
 unsigned long lastSync = millis();
@@ -208,21 +233,16 @@ static uint8_t rxShakeAction = 0;
 static bool isRxShakeAction = false;
 
 //almanac timestamp
-bool isAlamanacTimestamp = false;
 unsigned long updateAlmanacTimestampTime = 0;
-//almanac buffer
-const unsigned int ALMANAC_BUFFER_SIZE = 1024;
-uint8_t almanacBuffer[ALMANAC_BUFFER_SIZE];
-volatile unsigned int bufferPosition = 0;
-volatile bool downloadedAlmanacBlocks = false;
-volatile bool almanacBufferIsEmpty = true;
-volatile static uint8_t blockNumberIsSent = 0;
-const uint8_t ALMANAC_BLOCK_SIZE = 32;
+typedef struct
+{
+    bool needAlmanac;
+    bool updateAlmanacTimestamp;
+    uint32_t lastTimestamp;
+} almanac_timestamp_status_t;
 
-TCPClient client;
-
-unsigned long pollTime = 0;
-const unsigned long POLL_TIME_UPDATE = 5000;
+almanac_timestamp_status_t needToUpdateAlmanac(void);
+void checkAlmanacValidity(void);
 
 char CMD[3];
 volatile bool cfg = false;
@@ -249,6 +269,7 @@ void setup()
     }
   // Put initialization like pinMode and begin functions here.
     Serial.begin(9600);
+    Serial1.begin(9600); //hardware UART
     while(!Serial);
 
     Wire.begin(MODEM_ADDRESS);
@@ -257,10 +278,7 @@ void setup()
 
     Cellular.setActiveSim(INTERNAL_SIM);
     Cellular.clearCredentials();
-    //получаем сразу последний таймстамп обновления альманаха на сервере
-    //almanacLastTiemstamp = getLastAlmanacUpdateTime();
-    //Serial.println(almanacLastTiemstamp);
-    //getLastAlamanac();
+    
     /*if (connectToAWS())
     {
         Serial.println("Connected.");
@@ -269,8 +287,7 @@ void setup()
     {
         Serial.println("Not connected.");
     } */
-    
-    
+    checkAlmanacValidity();
     //locator.withSubscribe(locationCallback).withLocatePeriodic(60);
 
 }
@@ -476,10 +493,10 @@ void loop()
     //получаем дату альманаха каждые 3 часа
     if (millis() - updateAlmanacTimestampTime >= THREE_HOUR_MILLIS)
     {
-        almanacLastTiemstamp = getLastAlmanacUpdateTime();
+        Serial.println("Hello");
+        updateAlmanacTimestampTime = millis();
+        checkAlmanacValidity();
     }
-    
-    getLastAlamanac();
 }
 
 
@@ -530,10 +547,6 @@ void receiveEvent(int n)
     if (!cfg && !pht && !gps && !act && !shk && !dat)
     {
         Wire.readBytesUntil('\r', CMD, sizeof(CMD));     
-        if (CMD[0] == 0x41 && CMD[1] == 0x4C && CMD[2] == 0x4D)
-        {
-            getAlmanac = true;
-        }
     }
 
     if (cfg)
@@ -653,48 +666,6 @@ void requestEvent(void)
         Wire.write(_cfg.enaLog);
         Wire.write(0xFF);
     }
-    else if (CMD[0] == 0x41 && CMD[1] == 0x4C && CMD[2] == 0x4D) //ALM
-    {
-        
-    }
-    else if (CMD[0] == 0x43 && CMD[1] == 0x44 && CMD[2] == 0x54) //CDT
-    {
-        Wire.write((uint8_t *)&almanacLastTiemstamp, 4); //send last timestamp
-    }
-    else if (CMD[0] == 0x44 && CMD[1] == 0x57 && CMD[2] == 0x4C) //DWL (подтверждает что блок данных скачан)
-    {
-        if (downloadedAlmanacBlocks)
-        {
-            Wire.write(0x44);
-        }   
-    }
-    else if (CMD[0] == 0x47 && CMD[1] == 0x41 && CMD[2] == 0x4D)
-    {
-        if (downloadedAlmanacBlocks && !almanacBufferIsEmpty)
-        {
-            if (blockNumberIsSent == 32)
-            {
-                Serial.println("Buffer was read.");
-                blockNumberIsSent = 0;
-                bufferPosition = 0;
-                downloadedAlmanacBlocks = false;
-                almanacBufferIsEmpty = true;
-            }
-            else
-            {
-                //send 32 bytes to esp
-                Wire.write(almanacBuffer + blockNumberIsSent * ALMANAC_BLOCK_SIZE, ALMANAC_BLOCK_SIZE);
-                blockNumberIsSent++;
-            }
-            
-/*             for (int pos = 0; pos < sizeof(almanacBuffer);)
-            {
-                Wire.write(almanacBuffer + pos, sizeof(almanacBuffer)/4);
-                pos =+ sizeof(almanacBuffer)/4;
-            } */
-            //bufferPosition = 0;
-        }
-    }
 }
 
 
@@ -719,125 +690,8 @@ unsigned int getLastAlmanacUpdateTime()
     http.get(request, response, headers);
     delay(1000);
     timestamp = (unsigned int)response.body.toInt();
-    //после получения обновляем таймер
-    updateAlmanacTimestampTime = millis();
 
     return timestamp;
-}
-
-bool getLastAlamanac(void)
-{
-    static uint16_t numberOfBlocks = 0;
-    uint16_t startByte = 0;
-    uint16_t endByte = 0;
-    const uint16_t blockSize = ALMANAC_BUFFER_SIZE;
-    if (getAlmanac && !downloadedAlmanacBlocks)
-    {
-        if (!client.connected())
-        {
-            bool connected = client.connect("oversery.globmill.tech", 80);       
-            if (!connected)
-            {
-                client.stop();
-                return false;        
-            }
-            startByte = blockSize * numberOfBlocks;
-            endByte = blockSize * (numberOfBlocks + 1) - 1;
-            Serial.println("connected");
-            client.print("GET ");
-            client.print("/almanac/MTK14.EPO");
-            //client.print("/almanac/date.txt");
-            client.println(" HTTP/1.1");
-            client.print("Host: ");
-            client.println("oversery.globmill.tech");
-            client.println("Content-Disposition: attachment; filename=\"MTK14.EPO\"");
-            client.println("Content-Type: application/octet-stream");
-            client.print("Range: bytes=");
-            client.print(startByte);
-            client.print("-");
-            client.println(endByte);
-            client.println("Connection: close");
-            client.println();
-
-            client.flush(); //блокирует пока все данные не будут отправлены
-        }
-        
-
-        unsigned long lastRead = millis();
-        bool hasBody = false;
-        int jj = 0;
-        bool skipResponseHeader = false;
-        int statusCode = 0;
-        int contentLength = 0;
-
-        do
-        {
-            if (client.available())
-            {
-                if (!skipResponseHeader)
-                {
-                    if (!client.find("HTTP/1.1"))
-                    {
-                        break;
-                    }
-                    statusCode = client.parseInt();
-                    if (statusCode != 206)
-                    {
-                        Serial.print("Status code: "); Serial.println(statusCode);
-                        return false;
-                    }
-
-                    if (!client.find("Content-Length:"))
-                    {
-                        break;
-                    }
-                    contentLength = client.parseInt();
-                    if (contentLength != 0)
-                    {
-                        hasBody = true;
-                        Serial.print("Content-Length: "); Serial.println(contentLength);
-                    }
-                    else
-                    {
-                        return false;
-                    }
-
-                    if (!client.find("\r\n\r\n"))
-                    {
-                        break;
-                    }
-
-                    skipResponseHeader = true;                
-                }
-                
-                if (hasBody)
-                {
-                    char c = client.read();
-                    almanacBuffer[bufferPosition] = c;
-                    //Serial.println((int)almanacBuffer[bufferPosition]);
-                    bufferPosition++;                   
-                    lastRead = millis();
-                    jj++;
-                }
-                
-            }
-
-        } while (client.connected() && millis() - lastRead < 5000);
-
-        Serial.println();
-        Serial.print(numberOfBlocks);
-        getAlmanac = false;
-        numberOfBlocks++;
-        if (numberOfBlocks == 105) // 107520/1024 == fileSize/blockSize
-        {
-            numberOfBlocks =  0;
-        }
-        
-        downloadedAlmanacBlocks = true; //1024-bytes block is downloaded
-        almanacBufferIsEmpty = false; //buffer is full
-        client.stop();
-    }
-    return true;
 }
 
 bool connectToAWS(void)
@@ -860,4 +714,448 @@ bool connectToAWS(void)
     }
     
     return true; */
+}
+
+static void _createLastPackage(void)
+{
+    uint8_t pos = 0;
+    uint8_t crc = 0;
+    uint16_t currEpoSeq = 65535;
+    uint8_t satSize = 60;
+    uint8_t epoBinPacket[EPO_BINARY_PACKET_LENGTH] = {0};
+
+    epoBinPacket[pos++] = PREAMBLE_LSB;
+    epoBinPacket[pos++] = PREAMBLE_MSB;
+    epoBinPacket[pos++] = LENGTH_LSB;
+    crc ^= LENGTH_LSB;
+    epoBinPacket[pos++] = LENGTH_MSB;
+    crc ^= LENGTH_MSB;
+    epoBinPacket[pos++] = PACK_TYPE_LSB;
+    crc ^= PACK_TYPE_LSB;
+    epoBinPacket[pos++] = PACK_TYPE_MSB;
+    crc ^= PACK_TYPE_MSB;
+    epoBinPacket[pos++] = GET_LSB_8BIT(currEpoSeq);
+    crc ^= GET_LSB_8BIT(currEpoSeq);
+    epoBinPacket[pos++] = GET_MSB_8BIT(currEpoSeq);
+    crc ^= GET_MSB_8BIT(currEpoSeq);
+    unsigned int ii = 0;
+    for (; ii < 3*satSize; ii++, pos++)
+    {
+        epoBinPacket[pos] = 0;
+
+    }    
+
+    epoBinPacket[pos++] = crc;
+    epoBinPacket[pos++] = END_WORD_LSB;
+    epoBinPacket[pos++] = END_WORD_MSB;
+
+                
+    Serial1.write(epoBinPacket, sizeof(epoBinPacket));
+    delay(1);
+
+}
+
+
+bool downloadAlmanac(unsigned int currentPacket)
+{
+    TCPClient client;
+    bool con = false;
+    unsigned int startByte = 0;
+    unsigned int endByte = 0;
+
+    startByte = currentPacket * 180;
+
+    if (currentPacket == 597)
+    {
+        endByte = startByte + 59;
+    }
+    else
+    {
+        endByte = 180 * (currentPacket + 1) - 1;
+    }
+    Serial.println(startByte);
+    Serial.println(endByte);
+
+    con = client.connect("oversery.globmill.tech", 80);
+
+    if (!con)
+    {
+        client.stop();
+        Serial.println("Can't be connected.");
+        return false;        
+    }
+
+    Serial.println("connected");
+    client.print("GET ");
+    client.print("/almanac/MTK14.EPO");
+    client.println(" HTTP/1.1");
+    client.print("Host: ");
+    client.println("oversery.globmill.tech");
+    client.println("Content-Disposition: attachment; filename=\"MTK14.EPO\"");
+    client.println("Content-Type: application/octet-stream");
+    client.print("Range: bytes=");
+    client.print(startByte);
+    client.print("-");
+    client.println(endByte);
+    client.println("Connection: close");
+    client.println();
+
+    client.flush(); //блокирует пока все данные не будут отправлены
+
+    unsigned int bufferPosition = 0;
+    unsigned long lastRead = millis();
+    bool hasBody = false;
+    bool skipResponseHeader = false;
+    int statusCode = 0;
+    int contentLength = 0;
+
+    do
+    {
+        if (client.available())
+        {
+            if (!skipResponseHeader)
+            {
+                if (!client.find("HTTP/1.1"))
+                {
+                    break;
+                }
+                statusCode = client.parseInt();
+                if (statusCode != 206)
+                {
+                    Serial.print("Status code: "); Serial.println(statusCode);
+                    return false;
+                }
+
+                if (!client.find("Content-Length:"))
+                {
+                    break;
+                }
+                contentLength = client.parseInt();
+                if (contentLength != 0)
+                {
+                    hasBody = true;
+                    Serial.print("Content-Length: "); Serial.println(contentLength);
+                }
+                else
+                {
+                    Serial.println("Here return");
+                    return false;
+                }
+
+                if (!client.find("\r\n\r\n"))
+                {
+                    break;
+                }
+
+                skipResponseHeader = true;                
+            }
+            
+            if (hasBody)
+            {
+                char c = client.read();
+                lastRead = millis();
+                //необходимо записать данные в буффер
+                _buffer[bufferPosition] = c;
+                bufferPosition++;
+            }
+            
+        }
+        
+    } while (client.connected() && millis() - lastRead < 5000);
+
+    client.stop();
+    Serial.println("Stop client.");
+
+    return true;
+}
+
+static bool _sendAlmanacToGps(void)
+{
+    size_t sz = 107520;
+    const uint8_t satSize = 60;
+    uint16_t totalBinPkt = 0; //store the total number of EPO BIN packets
+    uint8_t epoBinPacket[EPO_BINARY_PACKET_LENGTH] = {0};
+   
+    Serial1.write(0x04);
+    Serial1.write(0x24);
+    Serial1.write(0x0E);
+    Serial1.write(static_cast<byte>(0x00));
+    Serial1.write(0xFD);
+    Serial1.write(static_cast<byte>(0x00));
+    Serial1.write(static_cast<byte>(0x00)); //disable bin protocol
+    Serial1.write(static_cast<byte>(0x00));
+    Serial1.write(static_cast<byte>(0x00));
+    Serial1.write(static_cast<byte>(0x00));
+    Serial1.write(static_cast<byte>(0x00));
+    Serial1.write(static_cast<byte>(0xF3)); //crc
+    Serial1.write(static_cast<byte>(0x00));
+    Serial1.write(static_cast<byte>(0x00));
+
+    Serial1.println("$PMTK127*36");
+    delay(50);
+    Serial1.println("$PMTK253,1,9600*08"); //set baudrate $PMTK253,1,9600*08
+    //Serial.println("$PMTK607*33");
+
+    if (sz % 1920 != 0)
+    {
+        Serial.println("Verifiy error.");
+        return false;
+    }
+    else
+    {
+        totalBinPkt = sz / (3 * satSize) + 1; //number bin packets without last packet take it into account
+        
+        uint16_t currEpoSeq = 0;
+        uint16_t prevEpoSeq = 0;
+        uint8_t pos, crc;
+
+        for (unsigned int i = 0; i < totalBinPkt; i++)
+        {
+            pos = 0;
+            crc = 0;
+
+            epoBinPacket[pos++] = PREAMBLE_LSB;
+            epoBinPacket[pos++] = PREAMBLE_MSB;
+            epoBinPacket[pos++] = LENGTH_LSB;
+            crc ^= LENGTH_LSB;
+            epoBinPacket[pos++] = LENGTH_MSB;
+            crc ^= LENGTH_MSB;
+            epoBinPacket[pos++] = PACK_TYPE_LSB;
+            crc ^= PACK_TYPE_LSB;
+            epoBinPacket[pos++] = PACK_TYPE_MSB;
+            crc ^= PACK_TYPE_MSB;
+            epoBinPacket[pos++] = GET_LSB_8BIT(currEpoSeq);
+            crc ^= GET_LSB_8BIT(currEpoSeq);
+            epoBinPacket[pos++] = GET_MSB_8BIT(currEpoSeq);
+            crc ^= GET_MSB_8BIT(currEpoSeq);
+            //unsigned int ii = 0;
+            //качаем альманах
+            bool downloaded = downloadAlmanac(i);
+            if (downloaded)
+            {
+                Serial.println("Downloaded.");
+            }
+            else
+            {
+                Serial.println("Was not downloaded.");
+                return false;
+            }
+            delay(1000);
+
+            if (i != totalBinPkt - 1)
+            {
+                for (int item = 0; item < 3*satSize; item++, pos++)
+                {
+                    epoBinPacket[pos] = _buffer[item];
+                    crc ^= epoBinPacket[pos];
+                }   
+            }
+            else
+            {
+                int e = 0;
+                for (; e < satSize; e++, pos++)
+                {
+                    epoBinPacket[pos] = _buffer[e];
+                    crc ^= epoBinPacket[pos];
+                }
+                
+                for (; e < 2*satSize; e++, pos++)
+                {
+                    epoBinPacket[pos] = 0;
+                }
+            }
+
+            memset(_buffer, 0, sizeof(_buffer));
+
+            epoBinPacket[pos++] = crc;
+            epoBinPacket[pos++] = END_WORD_LSB;
+            epoBinPacket[pos++] = END_WORD_MSB;
+
+                        
+            Serial1.write(epoBinPacket, sizeof(epoBinPacket));
+
+            prevEpoSeq = currEpoSeq;
+            currEpoSeq++;
+            while(!Serial1.available());
+
+            receivedTimeout = millis();
+            while (millis() - receivedTimeout < EPO_RESPONSE_TIMEOUT)
+            {
+                if (Serial1.available() > 0)    
+                {
+                    rxChar = Serial1.read();
+                    while(!Serial1.available());
+                    if (rxChar == 0x04 && Serial1.available() > 0)
+                    {
+                        rxChar = Serial1.read();
+                        while(!Serial1.available());
+                        if (rxChar == 0x24 && Serial1.available() > 0)
+                        {
+                            rxChar = Serial1.read();
+                            while(!Serial1.available());
+                            if (rxChar == 0x0C && Serial1.available() > 0)
+                            {
+                                rxChar = Serial1.read();
+                                while(!Serial1.available());
+                                if (rxChar == 0x00 && Serial1.available() > 0)
+                                {
+                                    rxChar = Serial1.read();
+                                    while(!Serial1.available());
+                                    if (rxChar == 0x02 && Serial1.available() > 0)
+                                    {
+                                        rxChar = Serial1.read();
+                                        while(!Serial1.available());
+                                        if (rxChar == 0x00 && Serial1.available() > 0)
+                                        {
+                                            rxChar = Serial1.read();
+                                            //Serial.print("lsb "); Serial.println(rxChar);
+                                            while(!Serial1.available());
+                                            if (rxChar == GET_LSB_8BIT(prevEpoSeq) && Serial1.available() > 0)
+                                            {
+                                                rxChar = Serial1.read();
+                                                //Serial.print("msb "); Serial.println(rxChar);
+                                                while(!Serial1.available());
+                                                if (rxChar == GET_MSB_8BIT(prevEpoSeq) && Serial1.available() > 0)
+                                                {
+                                                    rxChar = Serial1.read();
+                                                    while(!Serial1.available());
+                                                    if (rxChar == 1 && Serial1.available() > 0)
+                                                    {
+                                                        Serial.print("msg received "); Serial.println(prevEpoSeq);
+                                                        delay(2);
+                                                        deliveredPckg++;
+                                                        break;
+                                                    }
+                                                    else if (rxChar == 0 && Serial1.available() > 0)
+                                                    {
+                                                        Serial.print("msg not received "); Serial.println(prevEpoSeq);
+                                                        return false;
+                                                    }
+                                                    
+                                                    
+                                                }
+                                                
+                                            }
+                                            
+                                        }
+                                        
+                                    }
+                                    
+                                }
+                                
+                            }
+                            
+                        }
+                        
+                    }
+                    
+                }
+                
+            }
+            
+            
+
+        }
+        
+        _createLastPackage();
+        Serial.print("The packages was delivered: "); Serial.println(deliveredPckg);
+
+        Serial1.write(0x04);
+        Serial1.write(0x24);
+        Serial1.write(0x0E);
+        Serial1.write(static_cast<byte>(0x00));
+        Serial1.write(0xFD);
+        Serial1.write(static_cast<byte>(0x00));
+        Serial1.write(static_cast<byte>(0x00)); //disable bin protocol
+        Serial1.write(static_cast<byte>(0x00));
+        Serial1.write(static_cast<byte>(0x00));
+        Serial1.write(static_cast<byte>(0x00));
+        Serial1.write(static_cast<byte>(0x00));
+        Serial1.write(static_cast<byte>(0xF3)); //crc
+        Serial1.write(static_cast<byte>(0x00));
+        Serial1.write(static_cast<byte>(0x00));
+        
+
+        delay(500);
+        //check epo status
+        Serial1.println("$PMTK607*33");
+
+        return true;
+    }
+}
+
+
+bool sendAlmanacToGps(void)
+{
+    uint8_t attempts = 0;
+    bool success = false;
+    const unsigned int ATTEMPTS = 3;
+
+    do
+    {
+        success = _sendAlmanacToGps();
+        attempts++;
+    } while (!success && attempts < ATTEMPTS);
+
+    return (success && attempts < ATTEMPTS) ? true : false;    
+}
+
+almanac_timestamp_status_t needToUpdateAlmanac(void)
+{
+    almanac_timestamp_status_t status = {false};
+    int almanacEepromAddress = 10;
+    uint32_t almanacTimestampFromEeprom = 0;
+    uint32_t delta = 0;
+    //получаем сразу последний таймстамп обновления альманаха на сервере
+    uint32_t almanacLastTiemstamp = getLastAlmanacUpdateTime();
+    Serial.print("Timestamp from server: "); Serial.println(almanacLastTiemstamp);
+    //считаем сохраненный таймстап с EEPROM
+    EEPROM.get(almanacEepromAddress, almanacTimestampFromEeprom);
+    Serial.print("Timestamp from EEPROM: "); Serial.println(almanacTimestampFromEeprom);
+    //если он равен 0, тогда выставляем флаг на скачку AGPS и флаг на то чтобы обновить таймстамп при успешной загрузки AGPS
+    //иначе сравниваем таймстамп с EEPROM и таймстам принятый с сервера и если разница больше чем 12 дней, тогда выставляем флаг на скачку AGPS и флаг на то чтобы обновить таймстамп при успешной загрузки AGPS
+    //иначе ничего не скачиваем
+    if (almanacTimestampFromEeprom == 0xFFFFFFFF)
+    {
+        status.needAlmanac = true;
+        status.updateAlmanacTimestamp = true;
+        status.lastTimestamp = almanacLastTiemstamp;
+        Serial.println("The almanac need to update.");
+        return status;
+    }
+    else
+    {
+        delta = almanacLastTiemstamp - almanacTimestampFromEeprom;
+        if (delta >= TWELVE_HOURS_IN_MS)
+        {
+            status.needAlmanac = true;
+            status.updateAlmanacTimestamp = true;
+            status.lastTimestamp = almanacLastTiemstamp;
+            Serial.println("The almanac need to update.");
+            return status;
+        }
+    }
+
+    Serial.println("The almanac doesn't need to update.");
+
+    return status;
+}
+
+void checkAlmanacValidity(void)
+{
+    bool result = false;
+    almanac_timestamp_status_t st = needToUpdateAlmanac();
+    if (st.needAlmanac && st.updateAlmanacTimestamp)
+    {
+        result = sendAlmanacToGps();
+        if (result)
+        {
+            EEPROM.put(10, st.lastTimestamp);       
+            Serial.println("The almanac was downloaded.");
+        }
+        else
+        {
+            Serial.println("The almanac wasn't downloaded.");
+        }
+    }
 }
