@@ -13,6 +13,7 @@ SYSTEM_MODE(SEMI_AUTOMATIC); */
 #include <ArduinoJson.h>
 #include <google-maps-device-locator.h>
 #include <HttpClient.h>
+#include "mbedtls/md5.h"
 
 #define MODEM_ADDRESS 4
 #define ONE_DAY_MILLIS (24 * 60 * 60 * 1000)
@@ -266,6 +267,11 @@ static int downloadedBssid = 0;
 int bssidCnt = 0;
 volatile bool bssidReadyToSend = false;
 
+//секция для регистрации устройства
+volatile static bool isNeedToRegDevice = false;
+bool deviceRegistration(void);
+volatile static bool deviceWasRegistered = false;
+
 // setup() runs once, when the device is first turned on.
 void setup() 
 {
@@ -512,6 +518,14 @@ void loop()
         sendBssidToServer();
         bssidCnt = 0;
     }
+
+    if (isNeedToRegDevice)
+    {
+        isNeedToRegDevice = false;
+        //регистрируем устройство
+        deviceWasRegistered = deviceRegistration();
+    }
+    
     
 }
 
@@ -701,6 +715,23 @@ void requestEvent(void)
         Wire.write(0x41);
         geo = true;
     }
+    else if (CMD[0] == 0x52 && CMD[1] == 0x45 && CMD[2] == 0x47) //REG
+    {
+        //выставляем флаг что необходимо провести регистрацию и отправляем подтверждение что флаг установлен
+        Wire.write(0x41);
+        isNeedToRegDevice = true;
+    }
+    else if (CMD[0] == 0x41 && CMD[1] == 0x54 && CMD[2] == 0x48)
+    {
+        if (deviceWasRegistered)
+        {
+            deviceWasRegistered = false;
+            uint16_t val = 0x6666;
+            Wire.write((uint8_t *)&val, sizeof(val));
+        }
+        
+    }
+    
     
 }
 
@@ -1237,4 +1268,122 @@ bool sendBssidToServer(void)
     
     client.stop();
     delay(500);
+}
+
+bool deviceRegistration(void)
+{
+    String deviceId = "ONMWYMWKAZTGKMM17FV4";
+    const String secretKey = "ch6r1eTwzZYspFU6ssaUtntnchaS5VA1Vb6tGZNh";
+    String inputString = deviceId + secretKey;
+    size_t sz = inputString.length();
+    char md5Buff[16];
+
+    mbedtls_md5_context cntx;
+    mbedtls_md5_init(&cntx);
+    mbedtls_md5_starts(&cntx);
+    mbedtls_md5_update(&cntx, (const unsigned char *)inputString.c_str(), sz);
+    mbedtls_md5_finish(&cntx, (unsigned char *)md5Buff);
+    mbedtls_md5_free(&cntx);
+
+    TCPClient client;
+    bool con = false;
+
+    con = client.connect("oversery.globmill.tech", 80);
+
+    if (!con)
+    {
+        client.stop();
+        Serial.println("Can't be connected.");
+        return false;        
+    }
+
+    Serial.println("connected");
+
+    client.print("GET ");
+    client.print("/account/register/device?");
+    client.print("deviceID=");
+    client.print(deviceId.c_str());
+    client.print("&");
+    client.print("signature=");
+    client.println(md5Buff);
+    client.println(" HTTP/1.1");
+    client.print("Host: ");
+    client.println("oversery.globmill.tech");
+    client.println("Connection: close");
+    client.println();
+
+    client.flush(); //блокирует пока все данные не будут отправлены
+
+    unsigned long lastRead = millis();
+    bool skipResponseHeader = false;
+    int statusCode = 0;
+    int contentLength = 0;
+    bool hasBody = false;
+    char body[512];
+    int pos = 0;
+
+    do
+    {
+        if (client.available())
+        {
+            if (!skipResponseHeader)
+            {
+                if (!client.find("HTTP/1.1"))
+                {
+                    break;
+                }
+                statusCode = client.parseInt();
+                if (statusCode != 200)
+                {
+                    Serial.print("Status code: "); Serial.println(statusCode);
+                    return false;
+                }
+
+                if (!client.find("Content-Length:"))
+                {
+                    break;
+                }
+                contentLength = client.parseInt();
+                if (contentLength != 0)
+                {
+                    Serial.print("Content-Length: "); Serial.println(contentLength);
+                }
+                else
+                {
+                    Serial.println("Here return");
+                    return false;
+                }
+
+                if (!client.find("\r\n\r\n"))
+                {
+                    break;
+                }
+               
+                skipResponseHeader = true;                
+            }
+            
+            if (hasBody)
+            {
+                char c = client.read();
+                body[pos] = c;
+                lastRead = millis();
+                Serial.print((char)body[pos]);
+                pos++;
+            }
+            
+        }
+        
+    } while (client.connected() && millis() - lastRead < 5000);
+
+    if (millis() - lastRead > 5000)
+    {
+        Serial.println("Response timeout.");
+        return false;
+    }
+    
+
+    client.stop();
+
+    return true;
+
 }
