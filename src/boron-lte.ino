@@ -9,11 +9,12 @@
 
 /* SYSTEM_THREAD(ENABLED);
 SYSTEM_MODE(SEMI_AUTOMATIC); */
-#include <MQTT-TLS.h>
+//#include <MQTT-TLS.h>
+//#include "mbedtls/md5.h"
 #include <ArduinoJson.h>
 #include <google-maps-device-locator.h>
 #include <HttpClient.h>
-#include "mbedtls/md5.h"
+#include "md5.h"
 
 #define MODEM_ADDRESS 4
 #define ONE_DAY_MILLIS (24 * 60 * 60 * 1000)
@@ -34,7 +35,7 @@ SYSTEM_MODE(SEMI_AUTOMATIC); */
 #define GET_MSB_8BIT(x) (x & 0xFF00) >> 8
 #define EPO_BINARY_PACKET_LENGTH 191 //191 bytes 
 #define EPO_RESPONSE_TIMEOUT 10000
-#define TWELVE_HOURS_IN_MS   1036800
+#define TWELVE_HOURS_IN_MS   62208000
 
 #define AMAZON_IOT_ROOT_CA_PEM                                          \
 "-----BEGIN CERTIFICATE-----\r\n" \
@@ -193,16 +194,10 @@ unsigned int deliveredPckg = 0;
 
 //MQTT client(AWS_endpoint, 8883, awsCallback);
 
-http_request_t request;
-http_response_t response;
 String host = "oversery.globmill.tech";
 String datePath = "/almanac/date.txt";
 String almanacPath = "/almanac/MTK14.EPO";
 int port = 80;
-http_header_t headers[] = {
-    { "Accept" , "*/*"},
-    { NULL, NULL } // NOTE: Always terminate headers will NULL
-};
 //uint32_t almanacLastTiemstamp = 0;
 
 
@@ -268,18 +263,12 @@ int bssidCnt = 0;
 volatile bool bssidReadyToSend = false;
 
 //секция для регистрации устройства
-volatile static bool isNeedToRegDevice = false;
 bool deviceRegistration(void);
-volatile static bool deviceWasRegistered = false;
+String accessToken = ""; //будем хранить аксес токен
 
 // setup() runs once, when the device is first turned on.
 void setup() 
 {
-    if (millis() - lastSync > ONE_DAY_MILLIS) 
-    {
-        Particle.syncTime();
-        lastSync = millis();
-    }
   // Put initialization like pinMode and begin functions here.
     Serial.begin(9600);
     Serial1.begin(9600); //hardware UART
@@ -291,7 +280,8 @@ void setup()
 
     Cellular.setActiveSim(INTERNAL_SIM);
     Cellular.clearCredentials();
-    
+
+    deviceRegistration();    
     /*if (connectToAWS())
     {
         Serial.println("Connected.");
@@ -315,7 +305,7 @@ void loop()
         client.loop();
     } */
 
-    if (cfgReceived)
+ /*    if (cfgReceived)
     {
         //reset received flag
         cfgReceived = false;
@@ -498,15 +488,14 @@ void loop()
         rxShakeAction);
         //client.publish(OV_TOPIC_SHAKE_ACTION, shakeMsg);
         free(shakeMsg);
-    }
+    } */
     
      //надо уйти в слип
     //System.sleep(D3, RISING);
 
     //получаем дату альманаха каждые 3 часа
-    if (millis() - updateAlmanacTimestampTime >= THREE_HOUR_MILLIS)
+    if (millis() - updateAlmanacTimestampTime >= 648000)
     {
-        Serial.println("Hello");
         updateAlmanacTimestampTime = millis();
         checkAlmanacValidity();
     }
@@ -517,15 +506,9 @@ void loop()
         //send bsssid to server
         sendBssidToServer();
         bssidCnt = 0;
+        geo = false;
     }
-
-    if (isNeedToRegDevice)
-    {
-        isNeedToRegDevice = false;
-        //регистрируем устройство
-        deviceWasRegistered = deviceRegistration();
-    }
-    
+   
     
 }
 
@@ -576,7 +559,7 @@ void receiveEvent(int n)
     //here we parse command from master(esp)
     if (!cfg && !pht && !gps && !act && !shk && !dat && !geo)
     {
-        Wire.readBytesUntil('\r', CMD, sizeof(CMD));     
+        Wire.readBytesUntil('\r', CMD, sizeof(CMD));
     }
 
     if (cfg)
@@ -714,24 +697,7 @@ void requestEvent(void)
     {
         Wire.write(0x41);
         geo = true;
-    }
-    else if (CMD[0] == 0x52 && CMD[1] == 0x45 && CMD[2] == 0x47) //REG
-    {
-        //выставляем флаг что необходимо провести регистрацию и отправляем подтверждение что флаг установлен
-        Wire.write(0x41);
-        isNeedToRegDevice = true;
-    }
-    else if (CMD[0] == 0x41 && CMD[1] == 0x54 && CMD[2] == 0x48)
-    {
-        if (deviceWasRegistered)
-        {
-            deviceWasRegistered = false;
-            uint16_t val = 0x6666;
-            Wire.write((uint8_t *)&val, sizeof(val));
-        }
-        
-    }
-    
+    }   
     
 }
 
@@ -748,15 +714,71 @@ void locationCallback(float i_lat, float i_lon, float i_accuracy)
 
 unsigned int getLastAlmanacUpdateTime()
 {
-    HttpClient http;
     unsigned int timestamp = 0;
-    request.hostname = host;
-    request.path = datePath;
-    request.port = port;
+    TCPClient client;
 
-    http.get(request, response, headers);
-    delay(1000);
-    timestamp = (unsigned int)response.body.toInt();
+    bool con = client.connect(host.c_str(), port);
+    if (!con)
+    {
+        client.stop();
+        Serial.println("Can't connect to server.");
+        return 0;
+    }
+    
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), 
+            "GET %s HTTP/1.1\r\n" \
+            "Host: %s\r\n" \
+            "Authorization: Bearer %s\r\n" \
+            "Connection: close\r\n" \
+            "\r\n", datePath.c_str(), host.c_str(), accessToken.c_str());
+
+    Serial.println(buffer);
+
+    client.write(buffer);
+    client.flush();
+
+    unsigned long lastRead = millis();
+    int statusCode = 0;
+    char body[512];
+    int pos = 0;
+
+    do
+    {
+        if (client.available())
+        {
+            char c = client.read();
+            body[pos] = c;
+            lastRead = millis();
+            pos++;
+        }
+        
+    } while (client.connected() && millis() - lastRead < 5000);
+
+    client.stop();
+    Serial.println();
+
+    if (millis() - lastRead > 5000)
+    {
+        Serial.println("Response timeout.");
+        return false;
+    }
+
+    String stringBody(body);
+
+    String status = stringBody.substring(9, 12);
+    Serial.println(status);
+
+    if (!status.equals("200"))
+    {
+        Serial.print("Error: "); Serial.println(status);
+        return 0;
+    }
+    
+    int dateStartPos = stringBody.indexOf("\r\n\r\n");
+    dateStartPos += strlen("\r\n\r\n");
+    String date = stringBody.substring(dateStartPos);
+    timestamp = date.toInt();
 
     return timestamp;
 }
@@ -843,7 +865,7 @@ bool downloadAlmanac(unsigned int currentPacket)
     Serial.println(startByte);
     Serial.println(endByte);
 
-    con = client.connect("oversery.globmill.tech", 80);
+    con = client.connect(host.c_str(), port);
 
     if (!con)
     {
@@ -858,6 +880,8 @@ bool downloadAlmanac(unsigned int currentPacket)
     client.println(" HTTP/1.1");
     client.print("Host: ");
     client.println("oversery.globmill.tech");
+    client.print("Authorization: Bearer ");
+    client.println(accessToken.c_str());
     client.println("Content-Disposition: attachment; filename=\"MTK14.EPO\"");
     client.println("Content-Type: application/octet-stream");
     client.print("Range: bytes=");
@@ -1272,18 +1296,64 @@ bool sendBssidToServer(void)
 
 bool deviceRegistration(void)
 {
-    String deviceId = "ONMWYMWKAZTGKMM17FV4";
+    int addr = 15;
+    const uint8_t REG_MARKER = 0x11;
+    uint8_t isReg = 0;
+    uint16_t size = 0;
+    
+    EEPROM.get(addr, isReg);
+
+    if (isReg == REG_MARKER)
+    {
+        Serial.println("Device was already registered.");
+        EEPROM.get(addr + 1, size);
+        if (size == 0)
+        {
+            Serial.println("Size is null.");
+            return false;
+        }
+        char *tok = (char *)malloc(size);
+        if (tok == NULL)
+        {
+            Serial.println("Can't allocated memory.");
+            free(tok);
+            return false;
+        }
+
+        memset(tok, 0, size);
+                
+        for (int i = 0; i < size; i++)
+        {
+            tok[i] = EEPROM.read(addr + 3 + i);
+            accessToken += tok[i]; //записываем считанный токен с EEPROM в глобальную переменную
+        }
+        free(tok);
+        Serial.println(accessToken);
+        return true;
+    }
+    
+    Serial.println("It is new device.");
+    Serial.println(isReg);
+
+    String deviceId = "FNMWYMWKAZTGKMM17FC7";
     const String secretKey = "ch6r1eTwzZYspFU6ssaUtntnchaS5VA1Vb6tGZNh";
     String inputString = deviceId + secretKey;
     size_t sz = inputString.length();
-    char md5Buff[16];
+    char md5Buff[16] = {0};
+    char buffer[512] = {0};
+    char hash[33];
 
-    mbedtls_md5_context cntx;
-    mbedtls_md5_init(&cntx);
-    mbedtls_md5_starts(&cntx);
-    mbedtls_md5_update(&cntx, (const unsigned char *)inputString.c_str(), sz);
-    mbedtls_md5_finish(&cntx, (unsigned char *)md5Buff);
-    mbedtls_md5_free(&cntx);
+    MD5_CTX ctx;
+    MD5_Init(&ctx);
+    MD5_Update(&ctx, (const char *)inputString.c_str(), sz);
+    MD5_Final((unsigned char *)md5Buff, &ctx);
+
+    snprintf(hash, sizeof(hash),"%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
+                    md5Buff[0], md5Buff[1], md5Buff[2], md5Buff[3], 
+                    md5Buff[4], md5Buff[5], md5Buff[6], md5Buff[7], 
+                    md5Buff[8], md5Buff[9], md5Buff[10], md5Buff[11], 
+                    md5Buff[12], md5Buff[13], md5Buff[14], md5Buff[15]);
+     
 
     TCPClient client;
     bool con = false;
@@ -1299,26 +1369,19 @@ bool deviceRegistration(void)
 
     Serial.println("connected");
 
-    client.print("GET ");
-    client.print("/account/register/device?");
-    client.print("deviceID=");
-    client.print(deviceId.c_str());
-    client.print("&");
-    client.print("signature=");
-    client.println(md5Buff);
-    client.println(" HTTP/1.1");
-    client.print("Host: ");
-    client.println("oversery.globmill.tech");
-    client.println("Connection: close");
-    client.println();
+    snprintf(buffer, sizeof(buffer),
+            "POST /account/register/device?deviceID=%s&signature=%s HTTP/1.1\r\n" \
+            "Host: oversery.globmill.tech\r\n" \
+            "Connection: close\r\n" \
+            "\r\n", deviceId.c_str(), hash);
+    
+    Serial.println(buffer);
+    client.write(buffer);
 
     client.flush(); //блокирует пока все данные не будут отправлены
 
     unsigned long lastRead = millis();
-    bool skipResponseHeader = false;
     int statusCode = 0;
-    int contentLength = 0;
-    bool hasBody = false;
     char body[512];
     int pos = 0;
 
@@ -1326,63 +1389,81 @@ bool deviceRegistration(void)
     {
         if (client.available())
         {
-            if (!skipResponseHeader)
-            {
-                if (!client.find("HTTP/1.1"))
-                {
-                    break;
-                }
-                statusCode = client.parseInt();
-                if (statusCode != 200)
-                {
-                    Serial.print("Status code: "); Serial.println(statusCode);
-                    return false;
-                }
-
-                if (!client.find("Content-Length:"))
-                {
-                    break;
-                }
-                contentLength = client.parseInt();
-                if (contentLength != 0)
-                {
-                    Serial.print("Content-Length: "); Serial.println(contentLength);
-                }
-                else
-                {
-                    Serial.println("Here return");
-                    return false;
-                }
-
-                if (!client.find("\r\n\r\n"))
-                {
-                    break;
-                }
-               
-                skipResponseHeader = true;                
-            }
-            
-            if (hasBody)
-            {
-                char c = client.read();
-                body[pos] = c;
-                lastRead = millis();
-                Serial.print((char)body[pos]);
-                pos++;
-            }
-            
+            char c = client.read();
+            body[pos] = c;
+            lastRead = millis();
+            pos++;
         }
         
     } while (client.connected() && millis() - lastRead < 5000);
+
+    client.stop();
+    Serial.println();
 
     if (millis() - lastRead > 5000)
     {
         Serial.println("Response timeout.");
         return false;
     }
-    
 
-    client.stop();
+    String stringBody(body);
+    Serial.println(stringBody);
+
+    int statusPos = stringBody.indexOf("\"status\":");
+    statusPos += strlen("\"status\"") + 1;
+    int startStatusPos = statusPos + 1;
+    int endStatusPos = stringBody.indexOf('"', startStatusPos + 1);
+    String status = stringBody.substring(startStatusPos, endStatusPos);
+
+    if (!status.equals("success"))
+    {
+        int msgPos = stringBody.indexOf("\"message\":");
+        msgPos += strlen("\"message\"") + 1;
+        int startMsgPos = msgPos + 1;
+        int endMsgPos = stringBody.indexOf('"', startMsgPos + 1);
+        String msg = stringBody.substring(startMsgPos, endMsgPos);
+        Serial.print(status); Serial.print(": "); Serial.println(msg);
+        return false;
+    }
+
+    Serial.println("Device was registered successfully.");
+    
+    int accessTokenPos = stringBody.indexOf("\"access_token\":"); //находим позицию первого вхожения "access_token"
+    accessTokenPos += strlen("\"access_token\"") + 1; //сдвигаемся на размер строки "access_token"
+    int startTokenPos = accessTokenPos + 1; //получаем позицию начала токена
+    int endTokenPos = stringBody.indexOf('"', startTokenPos + 1); //получаем индекс конца токена
+    String token = stringBody.substring(startTokenPos, endTokenPos); //вырезаем токен
+    accessToken = token; //сохраняем в глобальную переменную
+    Serial.println(accessToken);
+    Serial.println(token.length());
+    size = token.length();
+    
+    //clear eeprom section
+    for (int i = 0; i < size + 3; i++)
+    {
+        EEPROM.write(addr+i, 0xFF);
+    }
+    
+    EEPROM.write(addr, REG_MARKER);
+    delay(10);
+    EEPROM.put(addr+1, size);
+    delay(10);
+    char *tok = (char *)malloc(size);
+    if (tok == NULL)
+    {
+        Serial.println("Can't allocated memory1.");
+        free(tok);
+        return false;
+    }
+    memset(tok, 0, size);
+    strncpy(tok, token.c_str(), size);
+
+    for (int i = 0; i < size; i++)
+    {
+        EEPROM.write(addr+3+i, (uint8_t)tok[i]);
+    }
+    
+    free(tok);
 
     return true;
 

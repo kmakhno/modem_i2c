@@ -19,7 +19,11 @@
         "streambuf": "cpp",
         "utility": "cpp",
         "sstream": "cpp",
-        "thread": "cpp"
+        "thread": "cpp",
+        "vector": "cpp",
+        "optional": "cpp",
+        "string_view": "cpp",
+        "system_error": "cpp"
     },
     "particle.targetPlatform": "boron",
     "particle.targetDevice": "e00fce68318ed7e8dc028d0a",
