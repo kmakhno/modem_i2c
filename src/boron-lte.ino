@@ -118,16 +118,12 @@ const char clientKeyPem[] = CELINT_KEY_PEM;
 
 typedef struct
 {
-    char version[33];
-    char name[20];
-    char id[20];
     uint8_t armed;
     uint16_t locInt;
     uint8_t needPhoto;
     uint8_t photoInt;
     uint8_t soundAlarm;
     uint8_t crashLog;
-    uint8_t enaLog;
 } ov_cgf_s;
 
 typedef struct ov_gps_utc_t
@@ -265,6 +261,16 @@ volatile bool bssidReadyToSend = false;
 //секция для регистрации устройства
 bool deviceRegistration(void);
 String accessToken = ""; //будем хранить аксес токен
+String deviceID = ""; //храним ид устройства использовать партикл
+//секция для получения настроек от сервера
+bool getConfigurationParams(void);
+volatile bool getConfigPrams = false;
+volatile bool configParamsReady = false;
+volatile bool firstRegDevInit = false;
+volatile bool deviceWasRegistered = false;
+
+void setRegDevFlag(void);
+Timer firstRegDevTimer(10000, setRegDevFlag, true);
 
 // setup() runs once, when the device is first turned on.
 void setup() 
@@ -280,8 +286,11 @@ void setup()
 
     Cellular.setActiveSim(INTERNAL_SIM);
     Cellular.clearCredentials();
+    deviceWasRegistered = deviceRegistration();
+    //delay(10000);
 
-    deviceRegistration();    
+    //deviceRegistration();
+    //getConfigurationParams();    
     /*if (connectToAWS())
     {
         Serial.println("Connected.");
@@ -290,14 +299,26 @@ void setup()
     {
         Serial.println("Not connected.");
     } */
-    checkAlmanacValidity();
+    //checkAlmanacValidity();
     //locator.withSubscribe(locationCallback).withLocatePeriodic(60);
-
+    firstRegDevTimer.start();
 }
 
 // loop() runs over and over again, as quickly as it can execute.
 void loop() 
 {
+/*     if (firstRegDevInit)
+    {
+        firstRegDevInit = false;
+        deviceWasRegistered = deviceRegistration();
+    } */
+    
+    if (getConfigPrams)
+    {
+        getConfigPrams = false;
+        configParamsReady = getConfigurationParams();
+    }
+    
     //locator.loop();
 
 /*     if (client.isConnected()) 
@@ -494,7 +515,7 @@ void loop()
     //System.sleep(D3, RISING);
 
     //получаем дату альманаха каждые 3 часа
-    if (millis() - updateAlmanacTimestampTime >= 648000)
+    if (millis() - updateAlmanacTimestampTime >= 10800000)
     {
         updateAlmanacTimestampTime = millis();
         checkAlmanacValidity();
@@ -526,12 +547,6 @@ void awsCallback(char* topic, uint8_t* payload, unsigned int length)
         memset(&_cfg, 0, sizeof(_cfg));
 
         deserializeJson(doc, awsRxStr);
-        strcpy(_cfg.version, doc["ver"]);
-        Serial.println(_cfg.version);
-        strcpy(_cfg.id, doc["id"]);
-        Serial.println(_cfg.id);
-        strcpy(_cfg.name, doc["name"]);
-        Serial.println(_cfg.name);
         _cfg.armed = doc["isArmed"].as<uint8_t>();
         Serial.println(_cfg.armed);
         _cfg.locInt = doc["locInt"].as<uint16_t>();
@@ -544,8 +559,6 @@ void awsCallback(char* topic, uint8_t* payload, unsigned int length)
         Serial.println(_cfg.soundAlarm);
         _cfg.crashLog = doc["cLog"].as<uint8_t>();
         Serial.println(_cfg.crashLog);
-        _cfg.enaLog = doc["enaLog"].as<uint8_t>();
-        Serial.println(_cfg.enaLog);
         hasDataForESP = true;
 
         doc.clear();
@@ -637,7 +650,6 @@ void requestEvent(void)
     if (CMD[0] == 0x52 && CMD[1] == 0x44 && CMD[2] == 0x59) //RDY == CFG
     {     
         Wire.write(0x41);
-        cfg = true;
     }
     else if (CMD[0] == 0x50 && CMD[1] == 0x48 && CMD[2] == 0x54) //PHT
     {
@@ -661,37 +673,29 @@ void requestEvent(void)
     }
     else if (CMD[0] == 0x44 && CMD[1] == 0x41 && CMD[2] == 0x54) //DAT
     {
-        if (hasDataForESP)
-        {
-            Serial.println("has data.");
-            uint8_t msgSize = strlen(_cfg.version) + strlen(_cfg.name) + strlen(_cfg.id) + 7;
-            Serial.print("msg:");Serial.println(msgSize);
-            Wire.write(msgSize);
-        }
+        Serial.println("DAT");
+        getConfigPrams = true;
+        Wire.write(0x44);
     }
     else if (CMD[0] == 0x47 && CMD[1] == 0x45 && CMD[2] == 0x54) //GET
     {
-        hasDataForESP = false;
-        Wire.write(_cfg.version);
-        Wire.write(0xFF);
-        Wire.write(_cfg.name);
-        Wire.write(0xFF);
-        Wire.write(_cfg.id);
-        Wire.write(0xFF);
-        Wire.write(_cfg.armed);
-        Wire.write(0xFF);
-        Wire.write((uint8_t *)&_cfg.locInt, 2);
-        Wire.write(0xFF);
-        Wire.write(_cfg.needPhoto);
-        Wire.write(0xFF);
-        Wire.write(_cfg.photoInt);
-        Wire.write(0xFF);
-        Wire.write(_cfg.soundAlarm);
-        Wire.write(0xFF);
-        Wire.write(_cfg.crashLog);
-        Wire.write(0xFF);
-        Wire.write(_cfg.enaLog);
-        Wire.write(0xFF);
+        if (configParamsReady && deviceWasRegistered)
+        {
+            Serial.println("GET");
+            configParamsReady = false;
+            Wire.write(_cfg.armed);
+            Wire.write((uint8_t *)&_cfg.locInt, 2);
+            Wire.write(_cfg.needPhoto);
+            Wire.write(_cfg.photoInt);
+            Wire.write(_cfg.soundAlarm);
+            Wire.write(_cfg.crashLog);
+        }
+        else
+        {
+            Wire.write(0xFF);
+        }
+        
+        
     }
     else if(CMD[0] == 0x47 && CMD[1] == 0x45 && CMD[2] == 0x4F)
     {
@@ -1285,6 +1289,8 @@ bool sendBssidToServer(void)
     client.println(" HTTP/1.1");
     client.print("Host: ");
     client.println("oversery.globmill.tech");
+    client.print("Authorization: Bearer ");
+    client.println(accessToken.c_str());
     client.println("Connection: close");
     client.println();
 
@@ -1300,6 +1306,8 @@ bool deviceRegistration(void)
     const uint8_t REG_MARKER = 0x11;
     uint8_t isReg = 0;
     uint16_t size = 0;
+    String deviceId = "FNMWYMWKAZTGKMM17FC7";
+    deviceID = deviceId;
     
     EEPROM.get(addr, isReg);
 
@@ -1335,7 +1343,6 @@ bool deviceRegistration(void)
     Serial.println("It is new device.");
     Serial.println(isReg);
 
-    String deviceId = "FNMWYMWKAZTGKMM17FC7";
     const String secretKey = "ch6r1eTwzZYspFU6ssaUtntnchaS5VA1Vb6tGZNh";
     String inputString = deviceId + secretKey;
     size_t sz = inputString.length();
@@ -1467,4 +1474,125 @@ bool deviceRegistration(void)
 
     return true;
 
+}
+
+bool getConfigurationParams(void)
+{
+    TCPClient client;
+
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), 
+            "GET /devices?deviceID=%s HTTP/1.1\r\n" \
+            "Host: %s\r\n" \
+            "Authorization: Bearer %s\r\n" \
+            "Connection: close\r\n" \
+            "\r\n", deviceID.c_str(), host.c_str(), accessToken.c_str());
+
+    Serial.println(buffer);
+
+    bool con = client.connect(host.c_str(), port);
+    if (!con)
+    {
+        client.stop();
+        Serial.println("Can't be connected.");
+        return false;
+    }
+    
+
+    client.write(buffer);
+    client.flush();
+
+    unsigned long lastRead = millis();
+    int statusCode = 0;
+    char body[512] = {0};
+    int pos = 0;
+
+    do
+    {
+        if (client.available())
+        {
+            char c = client.read();
+            body[pos] = c;
+            lastRead = millis();
+            pos++;
+        }
+        
+    } while (client.connected() && millis() - lastRead < 5000);
+
+    client.stop();
+
+    if (millis() - lastRead > 5000)
+    {
+        Serial.println("Response timeout.");
+        return false;
+    }
+
+    String stringBody(body);
+
+    String status = stringBody.substring(9, 12);
+
+    if (!status.equals("200"))
+    {
+        Serial.print("Error: "); Serial.println(status);
+        return false;
+    }
+
+    int dataStartPos = stringBody.indexOf('{');
+    String data = stringBody.substring(dataStartPos);
+    Serial.println(data);
+
+    const size_t capacity = JSON_OBJECT_SIZE(2) + JSON_OBJECT_SIZE(14) + 240;
+    DynamicJsonDocument doc(capacity);
+
+    deserializeJson(doc, data.c_str());
+
+    const char* statusName = doc["status"]; // "success"
+
+    JsonObject result = doc["result"];
+    int result_longitude = result["longitude"]; // 0
+    int result_latitude = result["latitude"]; // 0
+    int result_isArmed = result["isArmed"]; // 0
+    int result_photoInterval = result["photoInterval"]; // 0
+    int result_locationInterval = result["locationInterval"]; // 30
+    int result_batteryLevel = result["batteryLevel"]; // 100
+    long result_updated = result["updated"]; // 1579265513
+    const char* result_name = result["name"]; // "FNMWYMWKAZTGKMM17FC7"
+    int result_crashLog = result["crashLog"]; // 1
+    int result_soundAlarm = result["soundAlarm"]; // 1
+    int result_needPhoto = result["needPhoto"]; // 0
+    const char* result_deviceID = result["deviceID"]; // "FNMWYMWKAZTGKMM17FC7"
+    int result_isOpened = result["isOpened"]; // 0
+    int result_pushEnabled = result["pushEnabled"]; // 0
+
+    doc.clear();
+
+
+/*     Serial.println(statusName);
+    Serial.println(result_longitude);
+    Serial.println(result_latitude);
+    Serial.println(result_isArmed);
+    Serial.println(result_photoInterval);
+    Serial.println(result_locationInterval);
+    Serial.println(result_batteryLevel);
+    Serial.println(result_updated);
+    Serial.println(result_name);
+    Serial.println(result_crashLog);
+    Serial.println(result_soundAlarm);
+    Serial.println(result_needPhoto);
+    Serial.println(result_deviceID);
+    Serial.println(result_isOpened);
+    Serial.println(result_pushEnabled); */
+    _cfg.armed = result_isArmed;
+    _cfg.photoInt = result_photoInterval;
+    _cfg.locInt = result_locationInterval;
+    _cfg.crashLog = result_crashLog;
+    _cfg.soundAlarm = result_soundAlarm;
+    _cfg.needPhoto = result_needPhoto;
+
+    return true;
+}
+
+void setRegDevFlag(void)
+{
+    firstRegDevInit = true;
 }
