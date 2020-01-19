@@ -269,6 +269,11 @@ volatile bool configParamsReady = false;
 volatile bool firstRegDevInit = false;
 volatile bool deviceWasRegistered = false;
 
+//секция для события открытия
+uint8_t openActionData[10];
+void sendOpenAction(void);
+void fixedToFloat(uint8_t data[], float *a, float *b);
+
 void setRegDevFlag(void);
 Timer firstRegDevTimer(10000, setRegDevFlag, true);
 
@@ -318,6 +323,13 @@ void loop()
         getConfigPrams = false;
         configParamsReady = getConfigurationParams();
     }
+
+    if (isRxOpenAction)
+    {
+        isRxOpenAction = false;
+        sendOpenAction();
+    }
+    
     
     //locator.loop();
 
@@ -612,12 +624,10 @@ void receiveEvent(int n)
         act = false;
         for (int i = 0; i < n && Wire.available() > 0; i++)
         {
-/*             rxOpenAction = Wire.read();
-            Serial.println(rxOpenAction);
-            isRxOpenAction = true; */
-            Serial.println(Wire.read());
+            openActionData[i] = Wire.read();
+            //Serial.println(rxOpenAction);
         }
-        
+        isRxOpenAction = true;
     }
     else if (shk)
     {
@@ -1597,3 +1607,109 @@ void setRegDevFlag(void)
 {
     firstRegDevInit = true;
 }
+
+void sendOpenAction(void)
+{
+    TCPClient client;
+    float flat, flon;
+    uint8_t d[10] = {1, 120, 0, 0, 0, 0, 120, 0, 0, 0};
+    fixedToFloat(openActionData, &flat, &flon);
+
+    char buffer[512];
+
+    snprintf(buffer, sizeof(buffer), 
+            "POST /events?sessionID=%s&deviceID=%s&event=%s&latitude=%.02f&longitude=%.02f&timestamp=%d HTTP/1.1\r\n" \
+            "Host: %s\r\n" \
+            "Authorization: Bearer %s\r\n" \
+            "Connection: close\r\n" \
+            "\r\n", "bluesky", deviceID.c_str(), "open", flat, flon, millis(),
+            host.c_str(), accessToken.c_str());
+
+    Serial.println(buffer);
+
+    bool con = client.connect(host.c_str(), port);
+    if (!con)
+    {
+        client.stop();
+        Serial.println("Can't be connected.");
+    }
+    
+
+    client.write(buffer);
+    client.flush();
+
+    unsigned long lastRead = millis();
+    int statusCode = 0;
+    char body[512] = {0};
+    int pos = 0;
+
+    do
+    {
+        if (client.available())
+        {
+            char c = client.read();
+            body[pos] = c;
+            lastRead = millis();
+            pos++;
+        }
+        
+    } while (client.connected() && millis() - lastRead < 5000);
+
+    client.stop();
+
+    if (millis() - lastRead > 5000)
+    {
+        Serial.println("Response timeout.");
+    }
+
+    String stringBody(body);
+
+    int statusPos = stringBody.indexOf("\"status\":");
+    statusPos += strlen("\"status\"") + 1;
+    int startStatusPos = statusPos + 1;
+    int endStatusPos = stringBody.indexOf('"', startStatusPos + 1);
+    String status = stringBody.substring(startStatusPos, endStatusPos);
+
+    if (!status.equals("success"))
+    {
+        int msgPos = stringBody.indexOf("\"message\":");
+        msgPos += strlen("\"message\"") + 1;
+        int startMsgPos = msgPos + 1;
+        int endMsgPos = stringBody.indexOf('"', startMsgPos + 1);
+        String msg = stringBody.substring(startMsgPos, endMsgPos);
+        Serial.print(status); Serial.print(": "); Serial.println(msg);
+    }
+    else
+    {
+        Serial.println("Event was sent successfully.");   
+    }
+}
+
+
+void fixedToFloat(uint8_t data[], float *a, float *b)
+{
+    uint32_t lat = 0, lon = 0;
+    uint8_t pos = 0;
+
+    uint8_t latSign = data[pos++];
+    lat = data[pos++];
+    lat += data[pos++] << 8;
+    lat += data[pos++] << 16;
+    lat += data[pos++] << 24;  
+
+    uint8_t lonSign = data[pos++];
+    lon = data[pos++];
+    lon += data[pos++] << 8;
+    lon += data[pos++] << 16;
+    lon += data[pos++] << 24;  
+
+    float lt = lat / 10000.0;
+    float ln = lon / 10000.0;
+
+    (latSign == 0) ? -1.0 * lt : lt;
+    (lonSign == 0) ? -1.0 * ln : ln;
+
+    *a = lt;
+    *b = ln;
+}
+
