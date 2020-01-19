@@ -274,6 +274,12 @@ uint8_t openActionData[10];
 void sendOpenAction(void);
 void fixedToFloat(uint8_t data[], float *a, float *b);
 
+void sendEvent(const char *eventName);
+
+//секция для события удара
+uint8_t shakeActionData[10];
+void sendShakeAction(void);
+
 void setRegDevFlag(void);
 Timer firstRegDevTimer(10000, setRegDevFlag, true);
 
@@ -329,6 +335,13 @@ void loop()
         isRxOpenAction = false;
         sendOpenAction();
     }
+
+    if (isRxShakeAction)
+    {
+        isRxShakeAction = false;
+        sendShakeAction();
+    }
+    
     
     
     //locator.loop();
@@ -634,10 +647,10 @@ void receiveEvent(int n)
         shk = false;
         for (int i = 0; i < n && Wire.available() > 0; i++)
         {
-            rxShakeAction = Wire.read();
-            isRxShakeAction = true;
+            //Serial.println(Wire.read());
+            shakeActionData[i] = Wire.read();
         }
-        
+        isRxShakeAction = true;        
     }
     else if (geo)
     {
@@ -679,7 +692,7 @@ void requestEvent(void)
     }
     else if (CMD[0] == 0x53 && CMD[1] == 0x48 && CMD[2] == 0x4B) //SHK
     {
-        Wire.write(0x41);
+        Wire.write(0x46);
         shk = true;
     }
     else if (CMD[0] == 0x44 && CMD[1] == 0x41 && CMD[2] == 0x54) //DAT
@@ -1610,6 +1623,44 @@ void setRegDevFlag(void)
 
 void sendOpenAction(void)
 {
+    sendEvent("open");
+}
+
+
+void fixedToFloat(uint8_t data[], float *a, float *b)
+{
+    uint32_t lat = 0, lon = 0;
+    uint8_t pos = 0;
+
+    uint8_t latSign = data[pos++];
+    lat = data[pos++];
+    lat += data[pos++] << 8;
+    lat += data[pos++] << 16;
+    lat += data[pos++] << 24;  
+
+    uint8_t lonSign = data[pos++];
+    lon = data[pos++];
+    lon += data[pos++] << 8;
+    lon += data[pos++] << 16;
+    lon += data[pos++] << 24;  
+
+    float lt = lat / 10000.0;
+    float ln = lon / 10000.0;
+
+    (latSign == 0) ? -1.0 * lt : lt;
+    (lonSign == 0) ? -1.0 * ln : ln;
+
+    *a = lt;
+    *b = ln;
+}
+
+void sendShakeAction(void)
+{
+    sendEvent("crash");
+}
+
+void sendEvent(const char *eventName)
+{
     TCPClient client;
     float flat, flon;
     uint8_t d[10] = {1, 120, 0, 0, 0, 0, 120, 0, 0, 0};
@@ -1622,7 +1673,7 @@ void sendOpenAction(void)
             "Host: %s\r\n" \
             "Authorization: Bearer %s\r\n" \
             "Connection: close\r\n" \
-            "\r\n", "bluesky", deviceID.c_str(), "open", flat, flon, millis(),
+            "\r\n", "bluesky", deviceID.c_str(), eventName, flat, flon, millis(),
             host.c_str(), accessToken.c_str());
 
     Serial.println(buffer);
@@ -1681,35 +1732,6 @@ void sendOpenAction(void)
     }
     else
     {
-        Serial.println("Event was sent successfully.");   
+        Serial.printf("Event (%s) was sent successfully.", eventName);   
     }
 }
-
-
-void fixedToFloat(uint8_t data[], float *a, float *b)
-{
-    uint32_t lat = 0, lon = 0;
-    uint8_t pos = 0;
-
-    uint8_t latSign = data[pos++];
-    lat = data[pos++];
-    lat += data[pos++] << 8;
-    lat += data[pos++] << 16;
-    lat += data[pos++] << 24;  
-
-    uint8_t lonSign = data[pos++];
-    lon = data[pos++];
-    lon += data[pos++] << 8;
-    lon += data[pos++] << 16;
-    lon += data[pos++] << 24;  
-
-    float lt = lat / 10000.0;
-    float ln = lon / 10000.0;
-
-    (latSign == 0) ? -1.0 * lt : lt;
-    (lonSign == 0) ? -1.0 * ln : ln;
-
-    *a = lt;
-    *b = ln;
-}
-
