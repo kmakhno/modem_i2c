@@ -299,7 +299,7 @@ void setup()
     {
         Serial.println("Not connected.");
     } */
-    //checkAlmanacValidity();
+    checkAlmanacValidity();
     //locator.withSubscribe(locationCallback).withLocatePeriodic(60);
     firstRegDevTimer.start();
 }
@@ -612,9 +612,10 @@ void receiveEvent(int n)
         act = false;
         for (int i = 0; i < n && Wire.available() > 0; i++)
         {
-            rxOpenAction = Wire.read();
+/*             rxOpenAction = Wire.read();
             Serial.println(rxOpenAction);
-            isRxOpenAction = true;
+            isRxOpenAction = true; */
+            Serial.println(Wire.read());
         }
         
     }
