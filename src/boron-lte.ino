@@ -280,8 +280,6 @@ void sendEvent(const char *eventName);
 uint8_t shakeActionData[10];
 void sendShakeAction(void);
 
-void setRegDevFlag(void);
-Timer firstRegDevTimer(10000, setRegDevFlag, true);
 
 // setup() runs once, when the device is first turned on.
 void setup() 
@@ -298,247 +296,13 @@ void setup()
     Cellular.setActiveSim(INTERNAL_SIM);
     Cellular.clearCredentials();
     deviceWasRegistered = deviceRegistration();
-    //delay(10000);
 
-    //deviceRegistration();
-    //getConfigurationParams();    
-    /*if (connectToAWS())
-    {
-        Serial.println("Connected.");
-    }
-    else
-    {
-        Serial.println("Not connected.");
-    } */
     checkAlmanacValidity();
-    //locator.withSubscribe(locationCallback).withLocatePeriodic(60);
-    firstRegDevTimer.start();
 }
 
 // loop() runs over and over again, as quickly as it can execute.
 void loop() 
 {
-/*     if (firstRegDevInit)
-    {
-        firstRegDevInit = false;
-        deviceWasRegistered = deviceRegistration();
-    } */
-    
-    if (getConfigPrams)
-    {
-        getConfigPrams = false;
-        configParamsReady = getConfigurationParams();
-    }
-
-    if (isRxOpenAction)
-    {
-        isRxOpenAction = false;
-        sendOpenAction();
-    }
-
-    if (isRxShakeAction)
-    {
-        isRxShakeAction = false;
-        sendShakeAction();
-    }
-    
-    
-    
-    //locator.loop();
-
-/*     if (client.isConnected()) 
-    {
-        client.loop();
-    } */
-
- /*    if (cfgReceived)
-    {
-        //reset received flag
-        cfgReceived = false;
-
-        for (int jj = 0; jj < nn[3]; jj++)
-        {
-            isArmed = (uint8_t)cfgBuff[jj + nn[0] + nn[1] + nn[2]];
-        }
-        
-        for (int jj = 0; jj < nn[4]; jj++)
-        {
-            locInt = (uint16_t)cfgBuff[jj + nn[0] + nn[1] + nn[2] + nn[3]];
-        }
-        
-        for (int jj = 0; jj < nn[5]; jj++)
-        {
-            needPhoto = (uint8_t)cfgBuff[jj + nn[0] + nn[1] + nn[2] + nn[3] + nn[4]];
-        }
-        
-        for (int jj = 0; jj < nn[6]; jj++)
-        {
-            photoInt = (uint8_t)cfgBuff[jj + nn[0] + nn[1] + nn[2] + nn[3] + nn[4] + nn[5]];
-        }
-        
-        for (int jj = 0; jj < nn[7]; jj++)
-        {
-            soundAlarm = (uint8_t)cfgBuff[jj + nn[0] + nn[1] + nn[2] + nn[3] + nn[4] + nn[5] + nn[6]];
-        }
-        
-        for (int jj = 0; jj < nn[8]; jj++)
-        {
-            crashLog = (uint8_t)cfgBuff[jj + nn[0] + nn[1] + nn[2] + nn[3] + nn[4] + nn[5] + nn[6] + nn[7]];
-        }
-        
-        for (int jj = 0; jj < nn[9]; jj++)
-        {
-            enableLogging = (uint8_t)cfgBuff[jj + nn[0] + nn[1] + nn[2] + nn[3] + nn[4] + nn[5] + nn[6] + nn[7] + nn[8]];
-        }
-        //формируем JSON объект с текущими настройками
-        char *buff = (char *)calloc(1024, sizeof(char));
-        char *cfgV = (char *)calloc(nn[0] + 1, sizeof(uint8_t));
-        char *devN = (char *)calloc(nn[1] + 1, sizeof(uint8_t));
-        char *devI = (char *)calloc(nn[2] + 1, sizeof(uint8_t));
-        memcpy(cfgV, cfgBuff, nn[0]);
-        cfgV[nn[0] + 1] = '\0';
-        memcpy(devN, cfgBuff + nn[0], nn[1]);
-        devN[nn[1] + 1] = '\0';
-        memcpy(devI, cfgBuff + nn[0] + nn[1], nn[2]);
-        devI[nn[2] + 1] = '\0';
-        snprintf(buff, 1024,
-        "{\"ver\": \"%s\", \
-        \"id\": \"%s\", \
-        \"name\": \"%s\", \
-        \"isArmed\": \"%d\", \
-        \"locInt\": \"%d\", \
-        \"nPhoto\": \"%d\", \
-        \"pInt\": \"%d\", \
-        \"sAlarm\": \"%d\", \
-        \"cLog\": \"%d\", \
-        \"enaLog\": \"%d\" \
-        }", 
-        cfgV,
-        devI,
-        devN,
-        isArmed,
-        locInt,
-        needPhoto,
-        photoInt,
-        soundAlarm,
-        crashLog,
-        enableLogging);
-        Serial.println(buff);
-
-        //отправляем сформированный JSON объект на AWS
-        //client.publish(OV_TOPIC_CFG_GET, buff);
-        free(cfgV);
-        free(devN);
-        free(devI);
-        free(buff);
-    }
-
-
-    //Обработка принятых GPS координат и отправка их на AWS сервер
-    if (gpsReceived)
-    {
-        memset(&_gps, 0, sizeof(_gps));
-        gpsReceived = false;
-        int pos = 0;
-        _gps.gps_utc.hour = rxGpsData[pos++];
-        _gps.gps_utc.minute = rxGpsData[pos++];
-        _gps.gps_utc.seconds = rxGpsData[pos++];
-        _gps.gps_utc.day = rxGpsData[pos++];
-        _gps.gps_utc.month = rxGpsData[pos++];
-        _gps.gps_utc.year = rxGpsData[pos++];
-        _gps.gps_utc.year += rxGpsData[pos++] << 8;
-
-        int32_t lat_fixed = rxGpsData[pos++];
-        lat_fixed += rxGpsData[pos++] << 8;
-        lat_fixed += rxGpsData[pos++] << 16;
-        lat_fixed += rxGpsData[pos++] << 24;
-
-        _gps.gps_loc.latitude = (float)lat_fixed / 10000;
-
-        int32_t lon_fixed = rxGpsData[pos++];
-        lon_fixed += rxGpsData[pos++] << 8;
-        lon_fixed += rxGpsData[pos++] << 16;
-        lon_fixed += rxGpsData[pos++] << 24;
-
-        _gps.gps_loc.longitude = (float)lon_fixed / 10000;
-
-        _gps.gps_loc.lat = rxGpsData[pos++];
-        _gps.gps_loc.lon = rxGpsData[pos++];
-        _gps.gps_fix = rxGpsData[pos++];
-
-        isFix = _gps.gps_fix;
-        if (!isFix)
-        {
-            _gps.gps_loc.latitude = lat;
-            _gps.gps_loc.longitude = lon;
-        }
-        
-
-        char *buff = (char *)malloc(512 * sizeof(char));
-        memset(buff, 0, 512 * sizeof(char));
-        snprintf(buff, 512 * sizeof(char), 
-        "{ \
-        \"utc\":  \
-        { \
-        \"time\": \"%02u:%02u:%02u\", \
-        \"data\": \"%02u.%02u.%02u\" \
-        }, \
-        \"loc\": \
-        { \
-        \"lat\": \"%0.2f\", \
-        \"lon\": \"%0.2f\" \
-        }, \
-        \"fix\": \"%u\" \
-        }",
-        _gps.gps_utc.hour,
-        _gps.gps_utc.minute,
-        _gps.gps_utc.seconds,
-        _gps.gps_utc.day,
-        _gps.gps_utc.month,
-        _gps.gps_utc.year,
-        (_gps.gps_loc.lat == 'N') ? _gps.gps_loc.latitude : (!_gps.gps_fix) ? _gps.gps_loc.latitude : -1.0*_gps.gps_loc.latitude,
-        (_gps.gps_loc.lon == 'E') ? _gps.gps_loc.longitude : (!_gps.gps_fix) ? _gps.gps_loc.longitude : -1.0*_gps.gps_loc.longitude,
-        _gps.gps_fix);
-
-        Serial.println(buff);
-
-        //Send gps data to aws
-        //client.publish(OV_TOPIC_GPS_SET, buff);
-
-        free(buff);
-
-    }
-
-    //send to AWS an open action
-    if (isRxOpenAction)
-    {
-        isRxOpenAction = false;
-        char *openMsg = (char *)calloc(128, sizeof(uint8_t));
-        snprintf(openMsg, 128, 
-        "{ \
-        \"open\": \"%d\" \
-        }", 
-        rxOpenAction);
-        //client.publish(OV_TOPIC_OPEN_ACTION, openMsg);
-        free(openMsg);
-    }
-
-    if (isRxShakeAction)
-    {
-        isRxShakeAction = false;
-        char *shakeMsg = (char *)calloc(128, sizeof(uint8_t));
-        snprintf(shakeMsg, 128, 
-        "{ \
-        \"shake\": \"%d\" \
-        }", 
-        rxShakeAction);
-        //client.publish(OV_TOPIC_SHAKE_ACTION, shakeMsg);
-        free(shakeMsg);
-    } */
-    
-     //надо уйти в слип
-    //System.sleep(D3, RISING);
-
     //получаем дату альманаха каждые 3 часа
     if (millis() - updateAlmanacTimestampTime >= 10800000)
     {
@@ -1309,7 +1073,9 @@ bool sendBssidToServer(void)
         client.print(",");
         Serial.println((char *)(bssidBuffer + i));
     }
-    client.println((char *)(bssidBuffer + i));
+    client.print((char *)(bssidBuffer + i));
+    client.print("&deviceID=");
+    client.print(deviceID.c_str());
     client.println(" HTTP/1.1");
     client.print("Host: ");
     client.println("oversery.globmill.tech");
@@ -1330,7 +1096,7 @@ bool deviceRegistration(void)
     const uint8_t REG_MARKER = 0x11;
     uint8_t isReg = 0;
     uint16_t size = 0;
-    String deviceId = "FNMWYMWKAZTGKMM17FC7";
+    String deviceId = "FNMWYMWKAZTGKMM17FC7"; //for test
     deviceID = deviceId;
     
     EEPROM.get(addr, isReg);
